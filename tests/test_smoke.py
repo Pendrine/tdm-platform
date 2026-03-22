@@ -10,6 +10,7 @@ from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as cal
 from tdm_platform.services.pdf_service import _wrap_text
 from tdm_platform.services.smtp_service import SMTPSettingsStore
 from tdm_platform.storage.json_store import load_json_dict, save_json
+import pytest
 
 
 def test_smoke_import():
@@ -100,3 +101,46 @@ def test_amikacin_engine_calculates_pk():
     )
     assert result["peak"] > result["trough"]
     assert result["target_trough_max"] == 2.0
+
+
+def test_legacy_verification_email_reports_clear_smtp_auth_fallback(monkeypatch):
+    legacy_app = pytest.importorskip("legacy.tdm_platform_v0_9_3_beta_fixed")
+    monkeypatch.setattr(
+        legacy_app,
+        "get_smtp_settings",
+        lambda: {
+            "host": "smtp.example.com",
+            "port": 587,
+            "smtp_user": "doctor@example.com",
+            "smtp_pass": "wrong-pass",
+            "sender": "doctor@example.com",
+            "use_ssl": False,
+            "use_starttls": True,
+        },
+    )
+
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def ehlo(self):
+            return None
+
+        def starttls(self, context=None):
+            return None
+
+        def login(self, username, password):
+            raise legacy_app.smtplib.SMTPAuthenticationError(535, b"5.7.8 authentication failed")
+
+    monkeypatch.setattr(legacy_app.smtplib, "SMTP", FakeSMTP)
+    ok, message = legacy_app.AuthDialog.send_verification_email(object(), "user@example.com", "ABC123")
+
+    assert not ok
+    assert "SMTP hitelesítés sikertelen" in message
+    assert "ABC123" in message

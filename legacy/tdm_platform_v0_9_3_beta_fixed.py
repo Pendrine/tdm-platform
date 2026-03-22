@@ -1808,8 +1808,6 @@ class TDMMainWindow(QMainWindow):
         )
         try:
             context = ssl.create_default_context()
-            use_ssl = os.environ.get('TDM_SMTP_SSL', SMTP_DEFAULT_SSL).strip().lower() in {'1', 'true', 'yes', 'on'}
-            use_starttls = os.environ.get('TDM_SMTP_STARTTLS', SMTP_DEFAULT_STARTTLS).strip().lower() in {'1', 'true', 'yes', 'on'}
             if use_ssl:
                 with smtplib.SMTP_SSL(host, port, timeout=20, context=context) as server:
                     if smtp_user:
@@ -1825,6 +1823,11 @@ class TDMMainWindow(QMainWindow):
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
             return True, f"Visszaigazoló e-mail elküldve: {email}"
+        except smtplib.SMTPAuthenticationError as e:
+            return False, (
+                "Az SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
+                f"STARTTLS/SSL beállítást. Fejlesztői fallback ellenőrző kód: {code}. SMTP hiba: {e}"
+            )
         except Exception as e:
             return False, f"Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}"
 
@@ -2412,6 +2415,11 @@ class TDMMainWindow(QMainWindow):
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
             return True, f'Az ideiglenes jelszó elküldve: {email}'
+        except smtplib.SMTPAuthenticationError as e:
+            return False, (
+                "Az SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
+                f"STARTTLS/SSL beállítást. Fejlesztői fallback ideiglenes jelszó: {temp_password}. SMTP hiba: {e}"
+            )
         except Exception as e:
             return False, f'Az e-mail küldése nem sikerült ({e}). Ideiglenes jelszó: {temp_password}'
 

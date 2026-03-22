@@ -144,3 +144,40 @@ def test_legacy_verification_email_reports_clear_smtp_auth_fallback(monkeypatch)
     assert not ok
     assert "SMTP hitelesítés sikertelen" in message
     assert "ABC123" in message
+
+
+def test_legacy_v092_verification_email_reports_clear_smtp_auth_fallback(monkeypatch):
+    legacy_app = pytest.importorskip("legacy.tdm_platform_v0_9_3_beta_fixed")
+    monkeypatch.setenv("TDM_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("TDM_SMTP_PORT", "587")
+    monkeypatch.setenv("TDM_SMTP_USER", "doctor@example.com")
+    monkeypatch.setenv("TDM_SMTP_PASS", "wrong-pass")
+    monkeypatch.setenv("TDM_SMTP_FROM", "doctor@example.com")
+    monkeypatch.setenv("TDM_SMTP_STARTTLS", "1")
+    monkeypatch.setenv("TDM_SMTP_SSL", "0")
+
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def ehlo(self):
+            return None
+
+        def starttls(self, context=None):
+            return None
+
+        def login(self, username, password):
+            raise legacy_app.smtplib.SMTPAuthenticationError(535, b"5.7.8 authentication failed")
+
+    monkeypatch.setattr(legacy_app.smtplib, "SMTP", FakeSMTP)
+    ok, message = legacy_app.AuthDialog.send_verification_email(object(), "user@example.com", "XYZ789")
+
+    assert not ok
+    assert "SMTP hitelesítés sikertelen" in message
+    assert "XYZ789" in message

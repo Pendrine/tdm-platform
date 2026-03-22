@@ -789,8 +789,8 @@ class AuthDialog(QDialog):
         smtp_user = os.environ.get('TDM_SMTP_USER', SMTP_DEFAULT_USER).strip()
         smtp_pass = os.environ.get('TDM_SMTP_PASS', '').strip()
         sender = os.environ.get('TDM_SMTP_FROM', SMTP_DEFAULT_FROM or smtp_user or f'tdm-noreply@{ALLOWED_EMAIL_DOMAIN}')
-        if not host:
-            return False, f'Fejlesztői mód: ellenőrző kód = {code}'
+        if not host or not sender or not smtp_pass:
+            return False, f'Fejlesztői mód: SMTP jelszó nincs beállítva. Ellenőrző kód: {code}'
         msg = EmailMessage()
         msg['Subject'] = 'Klinikai TDM Platform – e-mail visszaigazolás'
         msg['From'] = sender
@@ -815,6 +815,11 @@ class AuthDialog(QDialog):
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
             return True, f'Visszaigazoló e-mail elküldve: {email}'
+        except smtplib.SMTPAuthenticationError as e:
+            return False, (
+                'Az SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, '
+                f'STARTTLS/SSL beállítást. Fejlesztői fallback ellenőrző kód: {code}. SMTP hiba: {e}'
+            )
         except Exception as e:
             return False, f'Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}'
 

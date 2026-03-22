@@ -1,5 +1,8 @@
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
 
 @dataclass
 class User:
@@ -9,6 +12,13 @@ class User:
     role: str = "orvos"
     verified: bool = False
     active: bool = True
+    password_hash: str = ""
+    verification_code: str = ""
+    verified_at: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class SMTPSettings:
@@ -19,6 +29,10 @@ class SMTPSettings:
     sender: str = ""
     use_starttls: bool = True
     use_ssl: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class HistoryRecord:
@@ -31,6 +45,9 @@ class HistoryRecord:
     regimen: str
     decision: str
     report: str
-    inputs: Dict[str, Any] = field(default_factory=dict)
-    app_version: Optional[str] = None
-    schema_version: Optional[int] = None
+    inputs: dict[str, Any] = field(default_factory=dict)
+    app_version: str | None = None
+    schema_version: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)

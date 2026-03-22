@@ -1,25 +1,41 @@
-def role_of(user: dict | None) -> str:
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+
+UserLike = Mapping[str, Any] | None
+
+
+def role_of(user: UserLike) -> str:
     return str((user or {}).get("role", "")).strip().lower()
 
-def is_moderator(user: dict | None) -> bool:
+
+def is_moderator(user: UserLike) -> bool:
     return role_of(user) == "moderator"
 
-def is_infectologist(user: dict | None) -> bool:
+
+def is_infectologist(user: UserLike) -> bool:
     return role_of(user) == "infektologus"
 
-def can_manage_users(user: dict | None) -> bool:
+
+def can_manage_users(user: UserLike) -> bool:
     return is_moderator(user)
 
-def can_manage_smtp(user: dict | None) -> bool:
+
+def can_manage_smtp(user: UserLike) -> bool:
     return is_moderator(user)
 
-def can_delete_history(user: dict | None) -> bool:
+
+def can_delete_history(user: UserLike) -> bool:
     return is_moderator(user)
 
-def can_bulk_export(user: dict | None) -> bool:
+
+def can_bulk_export(user: UserLike) -> bool:
     return is_infectologist(user) or is_moderator(user)
 
-def can_edit_history(user: dict | None, record_user_email: str) -> bool:
+
+def can_edit_history(user: UserLike, record_user_email: str) -> bool:
     if is_moderator(user):
         return True
     if not user:

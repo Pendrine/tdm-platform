@@ -17,6 +17,7 @@ Ez a csomag két célt szolgál:
 ```bash
 pip install -r requirements.txt
 python main.py
+python smoke.py
 python -m pytest -q
 ```
 

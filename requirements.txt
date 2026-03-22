@@ -1,0 +1,6 @@
+PySide6
+PySide6-WebEngine
+plotly
+openpyxl
+reportlab
+matplotlib

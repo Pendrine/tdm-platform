@@ -9,12 +9,12 @@ from PySide6.QtWidgets import QApplication, QDialog
 from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
 from tdm_platform.core.history import HistoryStore
-from tdm_platform.core.models import HistoryRecord
+from tdm_platform.core.models import HistoryRecord, SMTPSettings
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import calculate as calculate_vancomycin
 from tdm_platform.services.pdf_service import render_simple_report_pdf
-from tdm_platform.services.smtp_service import get_smtp_settings
+from tdm_platform.services.smtp_service import SMTPSettingsStore, get_smtp_settings
 from tdm_platform.ui.auth_dialog import AuthDialog
 from tdm_platform.ui.components.status_bar import AppStatusBar
 from tdm_platform.ui.history_tab import HistoryTabController
@@ -33,6 +33,34 @@ def _smtp_as_legacy_dict() -> dict[str, object]:
         "use_starttls": smtp.use_starttls,
         "use_ssl": smtp.use_ssl,
     }
+
+
+def _load_settings_file() -> dict[str, object]:
+    smtp = SMTPSettingsStore().load()
+    return {
+        "smtp_host": smtp.host,
+        "smtp_port": str(smtp.port),
+        "smtp_user": smtp.smtp_user,
+        "smtp_from": smtp.sender,
+        "smtp_pass": smtp.smtp_pass,
+        "smtp_starttls": "1" if smtp.use_starttls else "0",
+        "smtp_ssl": "1" if smtp.use_ssl else "0",
+    }
+
+
+def _save_settings_file(settings: dict[str, object]) -> None:
+    current = SMTPSettingsStore().load()
+    SMTPSettingsStore().save(
+        SMTPSettings(
+            host=str(settings.get("smtp_host", current.host)).strip(),
+            port=int(settings.get("smtp_port", current.port) or current.port),
+            smtp_user=str(settings.get("smtp_user", current.smtp_user)).strip(),
+            smtp_pass=str(settings.get("smtp_pass", current.smtp_pass)).strip(),
+            sender=str(settings.get("smtp_from", current.sender)).strip(),
+            use_starttls=str(settings.get("smtp_starttls", "1" if current.use_starttls else "0")).strip().lower() in {"1", "true", "yes", "on"},
+            use_ssl=str(settings.get("smtp_ssl", "1" if current.use_ssl else "0")).strip().lower() in {"1", "true", "yes", "on"},
+        )
+    )
 
 
 class MainWindow(legacy_ui.TDMMainWindow):
@@ -135,6 +163,8 @@ def run_app() -> int:
 legacy_ui.ensure_special_roles = ensure_special_roles
 legacy_ui.load_users_file = lambda: UserStore().load()
 legacy_ui.save_users_file = lambda users: UserStore().save(users)
+legacy_ui.load_settings_file = _load_settings_file
+legacy_ui.save_settings_file = _save_settings_file
 legacy_ui.get_smtp_settings = _smtp_as_legacy_dict
 legacy_ui.render_simple_report_pdf = render_simple_report_pdf
 legacy_ui.calculate_vancomycin = calculate_vancomycin

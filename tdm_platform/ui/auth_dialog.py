@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import smtplib
+
 from typing import Optional
 
 from tdm_platform.core.auth import UserStore, generate_temp_password, hash_password_value, user_is_active, validate_doctor_email_value
@@ -66,7 +68,7 @@ class AuthDialog(legacy_ui.AuthDialog):
                 ),
             )
             return True, f"Visszaigazoló e-mail elküldve: {email}"
-        except legacy_ui.smtplib.SMTPAuthenticationError as exc:
+        except smtplib.SMTPAuthenticationError as exc:
             return False, (
                 "Az SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
                 f"STARTTLS/SSL beállítást. Fejlesztői fallback ellenőrző kód: {code}. SMTP hiba: {exc}"
@@ -90,7 +92,7 @@ class AuthDialog(legacy_ui.AuthDialog):
                 ),
             )
             return True, f"Az ideiglenes jelszó elküldve: {email}"
-        except legacy_ui.smtplib.SMTPAuthenticationError as exc:
+        except smtplib.SMTPAuthenticationError as exc:
             return False, (
                 "Az SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
                 f"STARTTLS/SSL beállítást. Fejlesztői fallback ideiglenes jelszó: {temp_password}. SMTP hiba: {exc}"

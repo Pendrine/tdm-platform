@@ -784,23 +784,29 @@ class AuthDialog(QDialog):
         save_users_file(self.users_data)
 
     def send_verification_email(self, email: str, code: str) -> tuple[bool, str]:
-        host = os.environ.get('TDM_SMTP_HOST', SMTP_DEFAULT_HOST).strip()
-        port = int(os.environ.get('TDM_SMTP_PORT', SMTP_DEFAULT_PORT) or SMTP_DEFAULT_PORT)
-        smtp_user = os.environ.get('TDM_SMTP_USER', SMTP_DEFAULT_USER).strip()
-        smtp_pass = os.environ.get('TDM_SMTP_PASS', '').strip()
-        sender = os.environ.get('TDM_SMTP_FROM', SMTP_DEFAULT_FROM or smtp_user or f'tdm-noreply@{ALLOWED_EMAIL_DOMAIN}')
-        if not host:
-            return False, f'Fejlesztői mód: ellenőrző kód = {code}'
+        smtp = get_smtp_settings()
+        host = smtp['host']
+        port = smtp['port']
+        smtp_user = smtp['smtp_user']
+        smtp_pass = smtp['smtp_pass']
+        sender = smtp['sender'] or smtp_user
+
+        if not host or not sender or not smtp_pass:
+            return False, f'Az SMTP nincs teljesen beállítva. Ellenőrző kód: {code}'
+
         msg = EmailMessage()
         msg['Subject'] = 'Klinikai TDM Platform – e-mail visszaigazolás'
         msg['From'] = sender
         msg['To'] = email
-        msg.set_content(f"A Klinikai TDM Platform regisztrációjához használd ezt az ellenőrző kódot: {code}\n\nHa nem te indítottad a regisztrációt, hagyd figyelmen kívül ezt az üzenetet.\n")
+        msg.set_content(
+            "Kedves Kolléga!\n\n"
+            f"A Klinikai TDM Platform regisztrációjához használd ezt az ellenőrző kódot: {code}\n\n"
+            "Ha nem te indítottad a regisztrációt, hagyd figyelmen kívül ezt az üzenetet.\n"
+        )
+
         try:
             context = ssl.create_default_context()
-            use_ssl = os.environ.get('TDM_SMTP_SSL', SMTP_DEFAULT_SSL).strip().lower() in {'1', 'true', 'yes', 'on'}
-            use_starttls = os.environ.get('TDM_SMTP_STARTTLS', SMTP_DEFAULT_STARTTLS).strip().lower() in {'1', 'true', 'yes', 'on'}
-            if use_ssl:
+            if smtp['use_ssl']:
                 with smtplib.SMTP_SSL(host, port, timeout=20, context=context) as server:
                     if smtp_user:
                         server.login(smtp_user, smtp_pass)
@@ -808,12 +814,13 @@ class AuthDialog(QDialog):
             else:
                 with smtplib.SMTP(host, port, timeout=20) as server:
                     server.ehlo()
-                    if use_starttls:
+                    if smtp['use_starttls']:
                         server.starttls(context=context)
                         server.ehlo()
                     if smtp_user:
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
+
             return True, f'Visszaigazoló e-mail elküldve: {email}'
         except Exception as e:
             return False, f'Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}'

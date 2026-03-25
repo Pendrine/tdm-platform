@@ -812,7 +812,8 @@ class AuthDialog(QDialog):
         except smtplib.SMTPAuthenticationError:
             return False, (
                 "SMTP hitelesítés sikertelen.\n"
-                "Ellenőrizd a felhasználónevet, jelszót és STARTTLS/SSL beállítást."
+                "Ellenőrizd a felhasználónevet, jelszót és STARTTLS/SSL beállítást.\n"
+                f"Fejlesztői fallback ellenőrző kód: {code}"
             )
         except Exception as e:
             return False, f'Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}'
@@ -1819,7 +1820,8 @@ class TDMMainWindow(QMainWindow):
         except smtplib.SMTPAuthenticationError:
             return False, (
                 "SMTP hitelesítés sikertelen.\n"
-                "Ellenőrizd a felhasználónevet, jelszót és STARTTLS/SSL beállítást."
+                "Ellenőrizd a felhasználónevet, jelszót és STARTTLS/SSL beállítást.\n"
+                f"Fejlesztői fallback ellenőrző kód: {code}"
             )
         except Exception as e:
             return False, f"Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}"

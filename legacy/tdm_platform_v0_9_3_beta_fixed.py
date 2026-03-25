@@ -815,6 +815,11 @@ class AuthDialog(QDialog):
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
             return True, f'Visszaigazoló e-mail elküldve: {email}'
+        except smtplib.SMTPAuthenticationError as e:
+            return False, (
+                "SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
+                f"STARTTLS/SSL beállítást. Fejlesztői fallback ellenőrző kód: {code}. SMTP hiba: {e}"
+            )
         except Exception as e:
             return False, f'Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}'
 

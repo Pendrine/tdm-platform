@@ -809,10 +809,10 @@ class AuthDialog(QDialog):
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
             return True, f'Visszaigazoló e-mail elküldve: {email}'
-        except smtplib.SMTPAuthenticationError as e:
+        except smtplib.SMTPAuthenticationError:
             return False, (
-                "SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
-                f"STARTTLS/SSL beállítást. Fejlesztői fallback ellenőrző kód: {code}. SMTP hiba: {e}"
+                "SMTP hitelesítés sikertelen.\n"
+                "Ellenőrizd a felhasználónevet, jelszót és STARTTLS/SSL beállítást."
             )
         except Exception as e:
             return False, f'Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}'
@@ -940,12 +940,12 @@ class AuthDialog(QDialog):
             self.verify_email_edit.setText(email)
             self.login_identifier_combo.setEditText(record.get('username', email.split('@')[0]))
             self.refresh_login_autofill()
-            if not ok:
-                self.verify_code_edit.setText(code)
-                msg = f"{msg}\n\nA regisztráció rögzítve lett, a visszaigazolás helyben folytatható az ellenőrző kóddal."
+            self.verify_code_edit.clear()
+            if ok:
+                QMessageBox.information(self, 'Regisztráció', 'Ellenőrző kód elküldve az e-mail címre.')
             else:
-                self.verify_code_edit.clear()
-            QMessageBox.information(self, 'Regisztráció', msg)
+                print(f"[DEV][REGISTRATION] Local verification code for {email}: {code}")
+                QMessageBox.information(self, 'Regisztráció', msg)
         except Exception as e:
             QMessageBox.warning(self, 'Regisztrációs hiba', str(e))
 
@@ -1816,10 +1816,10 @@ class TDMMainWindow(QMainWindow):
                         server.login(smtp_user, smtp_pass)
                     server.send_message(msg)
             return True, f"Visszaigazoló e-mail elküldve: {email}"
-        except smtplib.SMTPAuthenticationError as e:
+        except smtplib.SMTPAuthenticationError:
             return False, (
-                "Az SMTP hitelesítés sikertelen. Ellenőrizd az SMTP felhasználónevet, jelszót, "
-                f"STARTTLS/SSL beállítást. Fejlesztői fallback ellenőrző kód: {code}. SMTP hiba: {e}"
+                "SMTP hitelesítés sikertelen.\n"
+                "Ellenőrizd a felhasználónevet, jelszót és STARTTLS/SSL beállítást."
             )
         except Exception as e:
             return False, f"Az e-mail küldése nem sikerült ({e}). Ellenőrző kód: {code}"
@@ -2513,9 +2513,11 @@ class TDMMainWindow(QMainWindow):
                 self.users_data.append(record)
             self.save_users()
             ok, msg = self.send_verification_email(email, code)
-            if not ok:
-                msg = f"{msg}\n\nA regisztráció rögzítve lett, a visszaigazolás helyben folytatható az ellenőrző kóddal."
-            QMessageBox.information(self, "Regisztráció", msg)
+            if ok:
+                QMessageBox.information(self, "Regisztráció", "Ellenőrző kód elküldve az e-mail címre.")
+            else:
+                print(f"[DEV][REGISTRATION] Local verification code for {email}: {code}")
+                QMessageBox.information(self, "Regisztráció", msg)
             self.login_identifier_combo.setEditText(record.get('username', email.split('@')[0]))
             self.refresh_login_autofill()
         except Exception as e:

@@ -938,11 +938,13 @@ class AuthDialog(QDialog):
             self.save_users()
             ok, msg = self.send_verification_email(email, code)
             self.verify_email_edit.setText(email)
-            self.verify_code_edit.setText(code)
             self.login_identifier_combo.setEditText(record.get('username', email.split('@')[0]))
             self.refresh_login_autofill()
             if not ok:
+                self.verify_code_edit.setText(code)
                 msg = f"{msg}\n\nA regisztráció rögzítve lett, a visszaigazolás helyben folytatható az ellenőrző kóddal."
+            else:
+                self.verify_code_edit.clear()
             QMessageBox.information(self, 'Regisztráció', msg)
         except Exception as e:
             QMessageBox.warning(self, 'Regisztrációs hiba', str(e))

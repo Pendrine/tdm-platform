@@ -3,4 +3,4 @@ PySide6-WebEngine
 plotly
 openpyxl
 reportlab
-matplotlib
+matplotlib>=3.8

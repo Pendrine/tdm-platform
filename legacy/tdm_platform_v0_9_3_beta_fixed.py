@@ -664,7 +664,7 @@ class AuthDialog(QDialog):
         header_layout.setSpacing(4)
         head = QLabel(f'Klinikai TDM Platform – belépés ({APP_VERSION})')
         head.setObjectName('HeaderTitle')
-        sub = QLabel('Bejelentkezés után nyílik meg a program. Alapértelmezetten csak @dpckorhaz.hu címmel lehet regisztrálni, teszt kivételként a visnyo.adam@gmail.com is engedélyezett.')
+        sub = QLabel('Bejelentkezés után nyílik meg a program. Alapértelmezetten csak @dpckorhaz.hu címmel lehet regisztrálni.')
         sub.setObjectName('HeaderSubtitle')
         sub.setWordWrap(True)
         header_layout.addWidget(head)
@@ -738,12 +738,6 @@ class AuthDialog(QDialog):
         ver_box.toggled.connect(lambda checked, box=ver_box: self._set_groupbox_content_visible(box, checked))
         layout.addWidget(ver_box)
 
-        helper = QTextBrowser()
-        helper.setOpenExternalLinks(True)
-        helper.setHtml(f'<b>Megjegyzés:</b><br>Ha nincs SMTP beállítva, fejlesztői módban a program kiírja a visszaigazoló kódot, így a teljes folyamat lokálisan is tesztelhető.<br><br><b>Verzió:</b> {APP_VERSION}<br><b>Build:</b> {BUILD_INFO}<br><b>Séma:</b> {SCHEMA_VERSION}')
-        helper.setMaximumHeight(100)
-        helper.setObjectName('HintBox')
-        layout.addWidget(helper)
         layout.addStretch(1)
 
     def _set_groupbox_content_visible(self, box: QGroupBox, visible: bool):
@@ -946,6 +940,8 @@ class AuthDialog(QDialog):
             self.verify_email_edit.setText(email)
             self.login_identifier_combo.setEditText(record.get('username', email.split('@')[0]))
             self.refresh_login_autofill()
+            if not ok:
+                msg = f"{msg}\n\nA regisztráció rögzítve lett, a visszaigazolás helyben folytatható az ellenőrző kóddal."
             QMessageBox.information(self, 'Regisztráció', msg)
         except Exception as e:
             QMessageBox.warning(self, 'Regisztrációs hiba', str(e))
@@ -1383,7 +1379,7 @@ class TDMMainWindow(QMainWindow):
         layout = QVBoxLayout(self.user_tab)
         title = QLabel("Orvos felhasználói hozzáférés")
         title.setObjectName("SectionTitle")
-        desc = QLabel("Alapból csak @dpckorhaz.hu e-mail címmel lehet regisztrálni, teszt kivételként a visnyo.adam@gmail.com is engedélyezett. A regisztráció után e-mailes visszaigazolás szükséges. SMTP beállítás nélkül fejlesztői módban a kód helyben jelenik meg.")
+        desc = QLabel("Alapból csak @dpckorhaz.hu e-mail címmel lehet regisztrálni. A regisztráció után e-mailes visszaigazolás szükséges.")
         desc.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(desc)
@@ -1447,7 +1443,7 @@ class TDMMainWindow(QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         title = QLabel("Export")
         title.setObjectName("SectionTitle")
-        desc = QLabel("TXT, JSON és PDF mentés. Innen közvetlenül el is küldhető a riport a beállított infektológus címzettek egyikének.")
+        desc = QLabel("TXT és PDF mentés. Innen közvetlenül el is küldhető a riport a beállított infektológus címzettek egyikének.")
         desc.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(desc)
@@ -1456,12 +1452,9 @@ class TDMMainWindow(QMainWindow):
         file_row = QHBoxLayout(file_box)
         b1 = QPushButton("TXT riport mentése")
         b1.clicked.connect(self.save_report_txt)
-        b2 = QPushButton("JSON eredmény mentése")
-        b2.clicked.connect(self.save_result_json)
         b3 = QPushButton("PDF riport mentése vizualizációval")
         b3.clicked.connect(self.save_report_pdf)
         file_row.addWidget(b1)
-        file_row.addWidget(b2)
         file_row.addWidget(b3)
         file_row.addStretch(1)
         layout.addWidget(file_box)
@@ -1678,10 +1671,6 @@ class TDMMainWindow(QMainWindow):
         a1 = QAction("TXT riport mentése", self)
         a1.triggered.connect(self.save_report_txt)
         menu.addAction(a1)
-        a2 = QAction("JSON eredmény mentése", self)
-        a2.triggered.connect(self.save_result_json)
-        menu.addAction(a2)
-        menu.addSeparator()
         a3 = QAction("Kilépés", self)
         a3.triggered.connect(self.close)
         menu.addAction(a3)
@@ -1856,6 +1845,10 @@ class TDMMainWindow(QMainWindow):
 
     def refresh_settings_tab(self):
         if not hasattr(self, "settings_email_label"):
+            return
+        try:
+            self.settings_email_label.setText(self.settings_email_label.text())
+        except RuntimeError:
             return
         if self.current_user:
             self.settings_email_label.setText(self.current_user.get("email", "—"))
@@ -2521,7 +2514,9 @@ class TDMMainWindow(QMainWindow):
                 self.users_data.append(record)
             self.save_users()
             ok, msg = self.send_verification_email(email, code)
-            QMessageBox.information(self, "Regisztráció", msg if ok else msg)
+            if not ok:
+                msg = f"{msg}\n\nA regisztráció rögzítve lett, a visszaigazolás helyben folytatható az ellenőrző kóddal."
+            QMessageBox.information(self, "Regisztráció", msg)
             self.login_identifier_combo.setEditText(record.get('username', email.split('@')[0]))
             self.refresh_login_autofill()
         except Exception as e:

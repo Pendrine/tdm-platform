@@ -1,4 +1,4 @@
-from legacy.tdm_platform_v0_9_3_beta_fixed import main
+from tdm_platform.ui.main_window import run_app
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(run_app())

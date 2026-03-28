@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
 )
+from shiboken6 import isValid
 
 from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
@@ -99,6 +100,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def _build_settings_dialog_content(self, parent_widget):
         super()._build_settings_dialog_content(parent_widget)
 
+        self._clear_storage_widget_refs()
+
         self.storage_box = QGroupBox("Adattárolási hely")
         storage_layout = QFormLayout(self.storage_box)
 
@@ -119,6 +122,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         parent_layout = parent_widget.layout()
         if parent_layout is not None:
             parent_layout.insertWidget(max(parent_layout.count() - 1, 0), self.storage_box)
+        parent_widget.destroyed.connect(lambda *_: self._clear_storage_widget_refs())
 
         self._refresh_storage_controls()
 
@@ -127,7 +131,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._refresh_storage_controls()
 
     def _refresh_storage_controls(self) -> None:
-        if not hasattr(self, "storage_box"):
+        if not self._storage_widgets_are_alive():
             return
 
         active_root = get_active_storage_root()
@@ -136,6 +140,21 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
         self.storage_box.setVisible(primary)
         self.storage_box.setEnabled(primary)
+
+    def _storage_widgets_are_alive(self) -> bool:
+        widgets = [
+            getattr(self, "storage_box", None),
+            getattr(self, "storage_root_edit", None),
+            getattr(self, "storage_browse_btn", None),
+            getattr(self, "storage_save_btn", None),
+        ]
+        return all(widget is not None and isValid(widget) for widget in widgets)
+
+    def _clear_storage_widget_refs(self) -> None:
+        self.storage_box = None
+        self.storage_root_edit = None
+        self.storage_browse_btn = None
+        self.storage_save_btn = None
 
     def _browse_storage_directory(self) -> None:
         current = self.storage_root_edit.text().strip() or str(get_active_storage_root())

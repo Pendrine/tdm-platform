@@ -5,10 +5,19 @@ from typing import Any
 
 
 UserLike = Mapping[str, Any] | None
+PRIMARY_MODERATOR_EMAIL = "visnyovszki.adam@dpckorhaz.hu"
 
 
 def role_of(user: UserLike) -> str:
     return str((user or {}).get("role", "")).strip().lower()
+
+
+def _email_of(user: UserLike) -> str:
+    return str((user or {}).get("email", "")).strip().lower()
+
+
+def is_primary_moderator(user: UserLike) -> bool:
+    return _email_of(user) == PRIMARY_MODERATOR_EMAIL
 
 
 def is_moderator(user: UserLike) -> bool:

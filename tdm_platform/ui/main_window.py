@@ -2,19 +2,36 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+)
 
 from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
 from tdm_platform.core.history import HistoryStore
 from tdm_platform.core.models import HistoryRecord, SMTPSettings
+from tdm_platform.core.permissions import is_primary_moderator
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import calculate as calculate_vancomycin
 from tdm_platform.services.pdf_service import render_simple_report_pdf
 from tdm_platform.services.smtp_service import SMTPSettingsStore, get_smtp_settings
+from tdm_platform.storage.paths import (
+    StorageMigrationError,
+    configure_storage_root,
+    get_active_storage_root,
+)
 from tdm_platform.ui.auth_dialog import AuthDialog
 from tdm_platform.ui.components.status_bar import AppStatusBar
 from tdm_platform.ui.history_tab import HistoryTabController
@@ -73,6 +90,90 @@ class MainWindow(legacy_ui.TDMMainWindow):
         super().__init__(current_user=current_user)
         self.setWindowTitle(APP_NAME)
         self.setStatusBar(AppStatusBar(self))
+
+    def _rebind_storage_backed_stores(self) -> None:
+        self._user_store = UserStore()
+        self._history_store = HistoryStore()
+        self._history_tab = HistoryTabController(self._history_store)
+
+    def _build_settings_dialog_content(self, parent_widget):
+        super()._build_settings_dialog_content(parent_widget)
+
+        self.storage_box = QGroupBox("Adattárolási hely")
+        storage_layout = QFormLayout(self.storage_box)
+
+        self.storage_root_edit = QLineEdit()
+        self.storage_root_edit.setReadOnly(True)
+        self.storage_browse_btn = QPushButton("Tallózás")
+        self.storage_browse_btn.clicked.connect(self._browse_storage_directory)
+        self.storage_save_btn = QPushButton("Tárolási hely beállítása")
+        self.storage_save_btn.clicked.connect(self._save_storage_directory)
+
+        picker_row = QHBoxLayout()
+        picker_row.addWidget(self.storage_root_edit)
+        picker_row.addWidget(self.storage_browse_btn)
+
+        storage_layout.addRow("Aktív storage root", picker_row)
+        storage_layout.addRow("", self.storage_save_btn)
+
+        parent_layout = parent_widget.layout()
+        if parent_layout is not None:
+            parent_layout.insertWidget(max(parent_layout.count() - 1, 0), self.storage_box)
+
+        self._refresh_storage_controls()
+
+    def refresh_settings_tab(self):
+        super().refresh_settings_tab()
+        self._refresh_storage_controls()
+
+    def _refresh_storage_controls(self) -> None:
+        if not hasattr(self, "storage_box"):
+            return
+
+        active_root = get_active_storage_root()
+        self.storage_root_edit.setText(str(active_root))
+        primary = is_primary_moderator(self.current_user)
+
+        self.storage_box.setVisible(primary)
+        self.storage_box.setEnabled(primary)
+
+    def _browse_storage_directory(self) -> None:
+        current = self.storage_root_edit.text().strip() or str(get_active_storage_root())
+        directory = QFileDialog.getExistingDirectory(self, "Központi adattárolási hely kiválasztása", current)
+        if directory:
+            self.storage_root_edit.setText(directory)
+
+    def _save_storage_directory(self) -> None:
+        if not is_primary_moderator(self.current_user):
+            QMessageBox.warning(self, "Jogosultság", "Az adattárolási helyet csak a főmoderátor módosíthatja.")
+            return
+
+        target_raw = self.storage_root_edit.text().strip()
+        if not target_raw:
+            QMessageBox.warning(self, "Adattárolás", "Adj meg egy célmappát az adattároláshoz.")
+            return
+
+        try:
+            new_root = configure_storage_root(Path(target_raw))
+        except StorageMigrationError as exc:
+            QMessageBox.warning(self, "Adattárolási hiba", str(exc))
+            return
+        except Exception as exc:  # defensive fallback for GUI error message
+            QMessageBox.warning(self, "Adattárolási hiba", f"Váratlan hiba történt: {exc}")
+            return
+
+        self._rebind_storage_backed_stores()
+        self.users_data = ensure_special_roles(self.load_users())
+        self.history_data = self.load_history()
+        self.refresh_history_filter()
+        self.refresh_history_table()
+        self.refresh_settings_tab()
+
+        QMessageBox.information(
+            self,
+            "Adattárolás",
+            f"Az adattárolási hely frissítve lett: {new_root}\nA meglévő adatok átmásolása megtörtént.",
+        )
 
     def load_users(self) -> list[dict]:
         users = self._user_store.load()

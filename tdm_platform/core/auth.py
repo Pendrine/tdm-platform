@@ -7,7 +7,7 @@ from datetime import datetime
 
 from tdm_platform.core.models import User
 from tdm_platform.storage.json_store import load_json_list, save_json
-from tdm_platform.storage.paths import USERS_PATH
+from tdm_platform.storage.paths import get_storage_paths
 
 ALLOWED_EMAIL_DOMAIN = "dpckorhaz.hu"
 ALLOWED_TEST_EMAILS = {"visnyo.adam@gmail.com"}
@@ -73,8 +73,8 @@ def ensure_special_roles(users: list[dict]) -> list[dict]:
 
 
 class UserStore:
-    def __init__(self, path=USERS_PATH):
-        self.path = path
+    def __init__(self, path=None):
+        self.path = path or get_storage_paths().users_path
 
     def load(self) -> list[dict]:
         return ensure_special_roles(load_json_list(self.path))

@@ -7,7 +7,7 @@ from email.message import EmailMessage
 
 from tdm_platform.core.models import SMTPSettings
 from tdm_platform.storage.json_store import load_json_dict, save_json
-from tdm_platform.storage.paths import SETTINGS_PATH
+from tdm_platform.storage.paths import get_storage_paths
 
 SMTP_DEFAULT_HOST = "mail.dpckorhaz.hu"
 SMTP_DEFAULT_PORT = 587
@@ -18,8 +18,8 @@ SMTP_DEFAULT_SSL = False
 
 
 class SMTPSettingsStore:
-    def __init__(self, path=SETTINGS_PATH):
-        self.path = path
+    def __init__(self, path=None):
+        self.path = path or get_storage_paths().settings_path
 
     def load(self) -> SMTPSettings:
         data = load_json_dict(self.path)

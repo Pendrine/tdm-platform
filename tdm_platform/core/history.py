@@ -3,12 +3,12 @@ from __future__ import annotations
 from tdm_platform.app_meta import APP_VERSION, SCHEMA_VERSION
 from tdm_platform.core.models import HistoryRecord
 from tdm_platform.storage.json_store import load_json_list, save_json
-from tdm_platform.storage.paths import HISTORY_PATH
+from tdm_platform.storage.paths import get_storage_paths
 
 
 class HistoryStore:
-    def __init__(self, path=HISTORY_PATH):
-        self.path = path
+    def __init__(self, path=None):
+        self.path = path or get_storage_paths().history_path
 
     def load(self) -> list[dict]:
         data = load_json_list(self.path)

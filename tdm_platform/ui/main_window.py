@@ -201,6 +201,28 @@ class MainWindow(legacy_ui.TDMMainWindow):
             user.setdefault("username", str(user.get("email", "")).split("@")[0] if user.get("email") else "")
         return users
 
+    @staticmethod
+    def _normalize_email(email: object) -> str:
+        return str(email or "").strip().lower()
+
+    def _username_for_email(self, email: object) -> str:
+        normalized = self._normalize_email(email)
+        for user in self.users_data:
+            if self._normalize_email(user.get("email", "")) == normalized:
+                username = str(user.get("username", "")).strip()
+                if username:
+                    return username
+                break
+        return normalized.split("@", 1)[0] if "@" in normalized else normalized
+
+    def _display_name_for_user(self, user: Optional[dict]) -> str:
+        if not user:
+            return "—"
+        username = str(user.get("username", "")).strip()
+        if username:
+            return username
+        return self._username_for_email(user.get("email", ""))
+
     def save_users(self):
         self._user_store.save(self.users_data)
 
@@ -212,24 +234,132 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def refresh_history_filter(self):
         if hasattr(self, "history_user_filter"):
-            self._history_tab.refresh_filter(self.history_user_filter, self.history_data, self.current_user)
+            self._history_tab.refresh_filter(
+                self.history_user_filter,
+                self.history_data,
+                self.current_user,
+                username_resolver=self._username_for_email,
+            )
 
     def refresh_history_table(self):
         if hasattr(self, "history_table"):
-            selected = self.history_user_filter.currentText() if self.history_user_filter.count() else "Összes"
+            selected = self.history_user_filter.currentData() if self.history_user_filter.count() else "all"
             self._history_tab.populate_table(
                 self.history_table,
                 self.history_detail,
                 self.history_data,
                 selected_user=selected,
                 current_user=self.current_user,
+                username_resolver=self._username_for_email,
             )
 
     def show_history_detail(self):
         rows = self.history_table.property("history_rows") or []
         idx = self.history_table.currentRow()
         if 0 <= idx < len(rows):
-            self._history_tab.render_detail(self.history_detail, rows[idx])
+            self.history_table.setProperty("selected_history_record_id", id(rows[idx]))
+            self._history_tab.render_detail(self.history_detail, rows[idx], username_resolver=self._username_for_email)
+
+    def update_user_status_ui(self):
+        super().update_user_status_ui()
+        if self.current_user and hasattr(self, "user_status_label"):
+            role_txt = self.current_user.get("role", "orvos")
+            username = self._display_name_for_user(self.current_user)
+            self.user_status_label.setText(f"Bejelentkezve: {username} ({self.current_user.get('email','')}) – {role_txt}")
+
+    def refresh_settings_tab(self):
+        super().refresh_settings_tab()
+        if self.current_user and hasattr(self, "settings_name_label"):
+            self.settings_name_label.setText(self._display_name_for_user(self.current_user))
+
+    def refresh_user_admin_tables(self):
+        super().refresh_user_admin_tables()
+        if not hasattr(self, "settings_users_table"):
+            return
+        for row in range(self.settings_users_table.rowCount()):
+            email_item = self.settings_users_table.item(row, 1)
+            if email_item is None:
+                continue
+            username_item = self.settings_users_table.item(row, 0)
+            if username_item is None:
+                continue
+            username_item.setText(self._username_for_email(email_item.text()))
+
+    def collect_common(self) -> dict:
+        payload = super().collect_common()
+        if self.current_user:
+            payload["user"] = self._normalize_email(self.current_user.get("email", ""))
+        return payload
+
+    def load_selected_history_into_form(self):
+        super().load_selected_history_into_form()
+        rows = self.history_table.property("history_rows") or []
+        idx = self.history_table.currentRow()
+        if 0 <= idx < len(rows):
+            self.history_table.setProperty("selected_history_record_id", id(rows[idx]))
+
+    def update_selected_history_from_form(self):
+        try:
+            if not self.current_user:
+                raise ValueError("Előbb jelentkezz be.")
+            rec = None
+            selected_record_id = self.history_table.property("selected_history_record_id")
+            if selected_record_id:
+                rec = next((item for item in self.history_data if id(item) == selected_record_id), None)
+            if rec is None:
+                rows = self.history_table.property("history_rows") or []
+                idx = self.history_table.currentRow()
+                if idx < 0 or idx >= len(rows):
+                    raise ValueError("Nincs kijelölt rekord. Válassz ki egy módosítandó sort.")
+                rec = rows[idx]
+                self.history_table.setProperty("selected_history_record_id", id(rec))
+
+            rec_user = self._normalize_email(rec.get("user", ""))
+            cur_user = self._normalize_email((self.current_user or {}).get("email", ""))
+            is_moderator = bool(self.current_user and self.current_user.get("role") == "moderator")
+            if not is_moderator and rec_user and rec_user != cur_user:
+                raise ValueError("Csak a saját bejegyzésedet módosíthatod.")
+
+            pk = self.collect_common()
+            rec["patient_id"] = pk.get("patient_id", "")
+            rec["decision"] = pk.get("decision", "")
+            rec["user"] = cur_user or rec_user
+            rec["drug"] = self.antibiotic_combo.currentText().strip() or rec.get("drug", "")
+            rec["method"] = self.method_combo.currentText().strip() or rec.get("method", "")
+            rec["inputs"] = {
+                "nem": pk.get("sex"),
+                "életkor": pk.get("age"),
+                "testsúly": pk.get("weight"),
+                "magasság": pk.get("height"),
+                "kreatinin_µmol/L": pk.get("scr_umol"),
+                "MIC": pk.get("mic"),
+                "adag_mg": pk.get("dose"),
+                "intervallum_h": pk.get("tau"),
+                "infúzió_h": pk.get("tinf"),
+                "T1": pk.get("t1"),
+                "C1": pk.get("c1"),
+                "T2": pk.get("t2"),
+                "C2": pk.get("c2"),
+                "T3": pk.get("t3"),
+                "C3": pk.get("c3"),
+                "ICU": pk.get("icu"),
+                "hematológia": pk.get("hematology"),
+                "instabil_vese": pk.get("unstable_renal"),
+                "obesitas": pk.get("obesity"),
+                "neutropenia": pk.get("neutropenia"),
+            }
+            if self.latest_report and self.results:
+                rec["drug"] = self.results.get("drug", rec.get("drug", ""))
+                rec["method"] = self.results.get("method", rec.get("method", ""))
+                rec["status"] = self.results.get("status", rec.get("status", ""))
+                rec["regimen"] = self.results.get("regimen", rec.get("regimen", ""))
+                rec["report"] = self.results.get("report", rec.get("report", ""))
+            self.save_history()
+            self.refresh_history_filter()
+            self.refresh_history_table()
+            QMessageBox.information(self, "Előző mérések", "A kijelölt bejegyzés frissítve lett.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Frissítési hiba", str(exc))
 
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(

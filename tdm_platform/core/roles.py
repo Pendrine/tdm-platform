@@ -7,6 +7,12 @@ from typing import Any
 MODERATORS = {
     "visnyovszki.adam@dpckorhaz.hu",
 }
+PRIMARY_MODERATOR_EMAIL = "visnyovszki.adam@dpckorhaz.hu"
+
+
+def is_primary_moderator(user: Mapping[str, Any] | None) -> bool:
+    email = str((user or {}).get("email", "")).strip().lower()
+    return email == PRIMARY_MODERATOR_EMAIL
 
 
 def resolve_user_role(user: Mapping[str, Any] | None) -> str:

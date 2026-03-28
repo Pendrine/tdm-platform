@@ -14,6 +14,7 @@ from tdm_platform.core.auth import UserStore, ensure_special_roles
 from tdm_platform.core.history import HistoryStore
 from tdm_platform.core.models import HistoryRecord, SMTPSettings
 from tdm_platform.core.permissions import can_manage_smtp, can_manage_users
+from tdm_platform.core.roles import is_primary_moderator
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import calculate as calculate_vancomycin
@@ -104,13 +105,40 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def save_users(self):
         self._user_store.save(self.users_data)
 
+    def refresh_role_dependent_ui(self):
+        super().refresh_role_dependent_ui()
+        primary = is_primary_moderator(self.current_user)
+        critical_widgets = [
+            "set_moderator_btn",
+            "set_orvos_btn",
+            "disable_user_btn",
+            "enable_user_btn",
+            "delete_user_btn",
+            "create_user_btn",
+            "smtp_host_edit",
+            "smtp_port_edit",
+            "smtp_user_edit",
+            "smtp_from_edit",
+            "smtp_pass_edit",
+            "smtp_starttls_combo",
+            "smtp_ssl_combo",
+            "save_smtp_btn",
+            "test_smtp_btn",
+        ]
+        for name in critical_widgets:
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            widget.setEnabled(primary)
+            widget.setVisible(primary)
+
     def _ensure_manage_users_permission(self) -> None:
         if not can_manage_users(self.current_user):
-            raise ValueError("Ehhez moderátor jogosultság szükséges.")
+            raise ValueError("Ehhez elsődleges moderátor jogosultság szükséges.")
 
     def _ensure_manage_smtp_permission(self) -> None:
         if not can_manage_smtp(self.current_user):
-            raise ValueError("Ehhez moderátor jogosultság szükséges.")
+            raise ValueError("Ehhez elsődleges moderátor jogosultság szükséges.")
 
     def set_selected_user_role(self, role: str):
         try:

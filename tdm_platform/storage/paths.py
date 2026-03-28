@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
+
+from tdm_platform.core.roles import is_primary_moderator
 
 
 logger = logging.getLogger(__name__)
@@ -41,33 +45,98 @@ def get_data_dir() -> Path:
     return _ensure_dir(get_base_dir() / "data")
 
 
-def get_exports_dir() -> Path:
-    return _ensure_dir(get_data_dir() / "exports")
+def _storage_config_path() -> Path:
+    return get_data_dir() / "storage_paths.json"
 
 
-def get_data_file(name: str) -> Path:
-    if not name or Path(name).is_absolute():
-        raise ValueError("A data fájlnév relatív és nem üres kell legyen.")
-    target = (get_data_dir() / name).resolve()
-    data_root = get_data_dir().resolve()
-    if data_root not in target.parents and target != data_root:
-        raise ValueError("A data fájl csak a data könyvtáron belül lehet.")
+def _load_storage_config() -> dict[str, Any]:
+    path = _storage_config_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_storage_config(cfg: dict[str, Any]) -> None:
+    path = _storage_config_path()
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_secure_data_dir() -> Path:
+    cfg = _load_storage_config()
+    target = Path(str(cfg.get("secure_data_dir", get_data_dir() / "secure")))
+    if not target.is_absolute():
+        target = get_data_dir() / target
+    return _ensure_dir(target.resolve())
+
+
+def get_runtime_data_dir() -> Path:
+    cfg = _load_storage_config()
+    target = Path(str(cfg.get("runtime_data_dir", get_data_dir() / "runtime")))
+    if not target.is_absolute():
+        target = get_data_dir() / target
+    return _ensure_dir(target.resolve())
+
+
+def set_secure_data_dir(user: dict | None, directory: str | Path) -> Path:
+    if not is_primary_moderator(user):
+        raise PermissionError("Secure data directory-t csak primary moderator állíthat.")
+    target = _ensure_dir(Path(directory).expanduser().resolve())
+    cfg = _load_storage_config()
+    cfg["secure_data_dir"] = str(target)
+    _save_storage_config(cfg)
     return target
+
+
+def set_runtime_data_dir(user: dict | None, directory: str | Path) -> Path:
+    if not is_primary_moderator(user):
+        raise PermissionError("Runtime data directory-t csak primary moderator állíthat.")
+    target = _ensure_dir(Path(directory).expanduser().resolve())
+    cfg = _load_storage_config()
+    cfg["runtime_data_dir"] = str(target)
+    _save_storage_config(cfg)
+    return target
+
+
+def get_exports_dir() -> Path:
+    return _ensure_dir(get_runtime_data_dir() / "exports")
+
+
+def get_logs_dir() -> Path:
+    return _ensure_dir(get_runtime_data_dir() / "logs")
+
+
+def get_secure_file(name: str) -> Path:
+    if not name or Path(name).is_absolute():
+        raise ValueError("A secure fájlnév relatív és nem üres kell legyen.")
+    return (get_secure_data_dir() / name).resolve()
+
+
+def get_runtime_file(name: str) -> Path:
+    if not name or Path(name).is_absolute():
+        raise ValueError("A runtime fájlnév relatív és nem üres kell legyen.")
+    return (get_runtime_data_dir() / name).resolve()
 
 
 APP_BASE_DIR = get_base_dir()
 DATA_DIR = get_data_dir()
+SECURE_DATA_DIR = get_secure_data_dir()
+RUNTIME_DATA_DIR = get_runtime_data_dir()
 EXPORTS_DIR = get_exports_dir()
+LOGS_DIR = get_logs_dir()
 
 XLSX_CANDIDATES = (
     APP_BASE_DIR / "Új Microsoft Excel-munkalap.xlsx",
-    DATA_DIR / "Új Microsoft Excel-munkalap.xlsx",
+    RUNTIME_DATA_DIR / "Új Microsoft Excel-munkalap.xlsx",
 )
 XLSX_PATH = next((path for path in XLSX_CANDIDATES if path.exists()), XLSX_CANDIDATES[0])
 
-USERS_PATH = get_data_file("tdm_users.json")
-HISTORY_PATH = get_data_file("tdm_history.json")
-INFECTOLOGISTS_PATH = get_data_file("tdm_infectologists.json")
-SETTINGS_PATH = get_data_file("tdm_settings.json")
+USERS_PATH = get_secure_file("tdm_users.json")
+SETTINGS_PATH = get_secure_file("tdm_settings.json")
+INFECTOLOGISTS_PATH = get_secure_file("tdm_infectologists.json")
+HISTORY_PATH = get_runtime_file("tdm_history.json")
 
-logger.info("Active TDM data directory: %s", DATA_DIR)
+logger.info("Active TDM secure data directory: %s", SECURE_DATA_DIR)
+logger.info("Active TDM runtime data directory: %s", RUNTIME_DATA_DIR)

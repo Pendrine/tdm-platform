@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from tdm_platform.core.roles import resolve_user_role
+from tdm_platform.core.roles import is_primary_moderator, resolve_user_role
 
 
 UserLike = Mapping[str, Any] | None
@@ -22,11 +22,23 @@ def is_infectologist(user: UserLike) -> bool:
 
 
 def can_manage_users(user: UserLike) -> bool:
-    return is_moderator(user)
+    return is_primary_moderator(user)
 
 
 def can_manage_smtp(user: UserLike) -> bool:
-    return is_moderator(user)
+    return is_primary_moderator(user)
+
+
+def can_manage_secure_storage(user: UserLike) -> bool:
+    return is_primary_moderator(user)
+
+
+def can_manage_runtime_storage(user: UserLike) -> bool:
+    return is_primary_moderator(user)
+
+
+def can_manage_auth_security(user: UserLike) -> bool:
+    return is_primary_moderator(user)
 
 
 def can_delete_history(user: UserLike) -> bool:

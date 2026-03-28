@@ -4,8 +4,8 @@ from tdm_platform import app_meta
 from tdm_platform.core.auth import UserStore, generate_temp_password, validate_doctor_email_value
 from tdm_platform.core.history import HistoryStore
 from tdm_platform.core.models import HistoryRecord, SMTPSettings
-from tdm_platform.core.permissions import is_moderator
-from tdm_platform.core.roles import resolve_user_role
+from tdm_platform.core.permissions import can_manage_smtp, can_manage_users, is_moderator
+from tdm_platform.core.roles import is_primary_moderator, resolve_user_role
 from tdm_platform.pk.amikacin_engine import AmikacinInputs, calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import LinezolidInputs, calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as calculate_vancomycin
@@ -46,6 +46,18 @@ def test_role_from_json_is_not_authoritative(tmp_path: Path):
     assert resolve_user_role(attacker) == "user"
     assert attacker["role"] == "user"
     assert not is_moderator(attacker)
+    assert not is_primary_moderator(attacker)
+
+
+def test_primary_moderator_permissions():
+    primary = {"email": "visnyovszki.adam@dpckorhaz.hu", "role": "moderator"}
+    other_moderator = {"email": "other@dpckorhaz.hu", "role": "moderator"}
+    assert is_primary_moderator(primary)
+    assert can_manage_users(primary)
+    assert can_manage_smtp(primary)
+    assert not is_primary_moderator(other_moderator)
+    assert not can_manage_users(other_moderator)
+    assert not can_manage_smtp(other_moderator)
 
 
 def test_user_signature_detects_tampering():

@@ -886,12 +886,12 @@ class AuthDialog(QDialog):
         candidates = self._login_candidates()
         try:
             self.login_identifier_combo.clear()
-            self.login_identifier_combo.addItems(candidates)
         except Exception:
             pass
         completer = QCompleter(candidates, self)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
         self.login_identifier_combo.setCompleter(completer)
 
     def resolve_login_identifier(self, raw_value: str) -> str:
@@ -1347,7 +1347,7 @@ class TDMMainWindow(QMainWindow):
         self.clear_form_btn = QPushButton("Űrlap kitöltése kijelölt sorból")
         self.clear_form_btn.clicked.connect(self.load_selected_history_into_form)
         toolbar.addWidget(self.clear_form_btn)
-        self.save_history_changes_btn = QPushButton("Kijelölt sor mentése")
+        self.save_history_changes_btn = QPushButton("Kijelölt sor frissítése")
         self.save_history_changes_btn.clicked.connect(self.update_selected_history_from_form)
         toolbar.addWidget(self.save_history_changes_btn)
         self.delete_history_btn = QPushButton("Kijelölt sor törlése")
@@ -1752,6 +1752,25 @@ class TDMMainWindow(QMainWindow):
     def normalize_email(email: str) -> str:
         return str(email).strip().lower()
 
+    def username_for_email(self, email: str) -> str:
+        normalized = self.normalize_email(email)
+        user = self.find_user(normalized) if normalized else None
+        username = str((user or {}).get("username", "")).strip()
+        if username:
+            return username
+        if "@" in normalized:
+            return normalized.split("@", 1)[0]
+        return normalized
+
+    def display_name_for_user(self, user: Optional[dict]) -> str:
+        if not user:
+            return "—"
+        username = str(user.get("username", "")).strip()
+        if username:
+            return username
+        email = self.normalize_email(user.get("email", ""))
+        return email.split("@", 1)[0] if "@" in email else email or "—"
+
     @staticmethod
     def hash_password(password: str) -> str:
         return hashlib.sha256(password.encode("utf-8")).hexdigest()
@@ -1831,7 +1850,8 @@ class TDMMainWindow(QMainWindow):
         if self.current_user:
             if hasattr(self, "user_status_label"):
                 role_txt = self.current_user.get("role", "orvos")
-                self.user_status_label.setText(f"Bejelentkezve: {self.current_user.get('name','')} ({self.current_user.get('email','')}) – {role_txt}")
+                username = self.display_name_for_user(self.current_user)
+                self.user_status_label.setText(f"Bejelentkezve: {username} ({self.current_user.get('email','')}) – {role_txt}")
             if hasattr(self, "user_status_detail"):
                 self.user_status_detail.setText("Hitelesített orvos felhasználó. A naplózás az e-mail címhez kötve történik.")
             self.user_edit.setText(self.current_user.get("email", ""))
@@ -1854,7 +1874,7 @@ class TDMMainWindow(QMainWindow):
             return
         if self.current_user:
             self.settings_email_label.setText(self.current_user.get("email", "—"))
-            self.settings_name_label.setText(self.current_user.get("name", "—"))
+            self.settings_name_label.setText(self.display_name_for_user(self.current_user))
             self.settings_verified_label.setText("Igen" if self.current_user.get("verified") else "Nem")
             self.settings_role_label.setText(self.current_user.get("role", "orvos"))
             self.settings_new_name_edit.setText(self.current_user.get("name", ""))
@@ -1922,7 +1942,7 @@ class TDMMainWindow(QMainWindow):
             for user in users_sorted:
                 row = self.settings_users_table.rowCount()
                 self.settings_users_table.insertRow(row)
-                self.settings_users_table.setItem(row, 0, QTableWidgetItem(str(user.get("name", ""))))
+                self.settings_users_table.setItem(row, 0, QTableWidgetItem(self.display_name_for_user(user)))
                 self.settings_users_table.setItem(row, 1, QTableWidgetItem(str(user.get("email", ""))))
                 self.settings_users_table.setItem(row, 2, QTableWidgetItem(str(user.get("role", "orvos"))))
                 self.settings_users_table.setItem(row, 3, QTableWidgetItem("Igen" if user.get("verified") else "Nem"))
@@ -2456,12 +2476,12 @@ class TDMMainWindow(QMainWindow):
         candidates = self._login_candidates()
         try:
             self.login_identifier_combo.clear()
-            self.login_identifier_combo.addItems(candidates)
         except Exception:
             pass
         completer = QCompleter(candidates, self)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
         self.login_identifier_combo.setCompleter(completer)
 
     def resolve_login_identifier(self, raw_value: str) -> str:
@@ -2563,7 +2583,11 @@ class TDMMainWindow(QMainWindow):
             self.current_user = user
             self.update_user_status_ui()
             self.refresh_history_table()
-            QMessageBox.information(self, "Bejelentkezés", f"Sikeres bejelentkezés: {user.get('name','')} ({user.get('role','orvos')})")
+            QMessageBox.information(
+                self,
+                "Bejelentkezés",
+                f"Sikeres bejelentkezés: {self.display_name_for_user(user)} ({user.get('role','orvos')})",
+            )
         except Exception as e:
             QMessageBox.warning(self, "Bejelentkezési hiba", str(e))
 
@@ -2599,40 +2623,47 @@ class TDMMainWindow(QMainWindow):
     def refresh_history_filter(self):
         if not hasattr(self, "history_user_filter"):
             return
-        current = self.history_user_filter.currentText() if self.history_user_filter.count() else "Összes"
+        current_data = self.history_user_filter.currentData() if self.history_user_filter.count() else None
+        current_text = self.history_user_filter.currentText() if self.history_user_filter.count() else "Összes"
         users = sorted({str(r.get("user", "")).strip() for r in self.history_data if str(r.get("user", "")).strip()})
         self.history_user_filter.blockSignals(True)
         self.history_user_filter.clear()
-        self.history_user_filter.addItem("Összes")
+        self.history_user_filter.addItem("Összes", "all")
         if self.current_user:
-            self.history_user_filter.addItem("Saját")
-        self.history_user_filter.addItems(users)
-        idx = self.history_user_filter.findText(current)
+            self.history_user_filter.addItem("Saját", "own")
+        for email in users:
+            self.history_user_filter.addItem(self.username_for_email(email), email)
+        idx = self.history_user_filter.findData(current_data)
+        if idx < 0 and current_text == "Összes":
+            idx = self.history_user_filter.findData("all")
         self.history_user_filter.setCurrentIndex(max(0, idx))
         self.history_user_filter.blockSignals(False)
 
     def refresh_history_table(self):
         if not hasattr(self, "history_table"):
             return
-        selected_user = self.history_user_filter.currentText() if self.history_user_filter.count() else "Összes"
+        selected_user = self.history_user_filter.currentData() if self.history_user_filter.count() else "all"
         rows = self.history_data
-        if selected_user == "Saját" and self.current_user:
+        if selected_user == "own" and self.current_user:
             rows = [r for r in rows if str(r.get("user", "")).strip() == self.current_user.get("email", "")]
-        elif selected_user and selected_user != "Összes":
+        elif selected_user and selected_user != "all":
             rows = [r for r in rows if str(r.get("user", "")).strip() == selected_user]
         rows = sorted(rows, key=lambda x: str(x.get("timestamp", "")), reverse=True)
         self.history_table.setRowCount(len(rows))
         self.history_table.setProperty("history_rows", rows)
         for i, row in enumerate(rows):
+            display_user = self.username_for_email(str(row.get("user", "")))
             vals = [
-                row.get("timestamp", ""), row.get("user", ""), row.get("patient_id", ""), row.get("drug", ""),
+                row.get("timestamp", ""), display_user, row.get("patient_id", ""), row.get("drug", ""),
                 row.get("method", ""), row.get("status", ""), row.get("regimen", ""), row.get("decision", "")
             ]
             for j, val in enumerate(vals):
                 self.history_table.setItem(i, j, QTableWidgetItem(str(val)))
         if rows:
             self.history_table.selectRow(0)
+            self.history_table.setProperty("selected_history_record_id", id(rows[0]))
         else:
+            self.history_table.setProperty("selected_history_record_id", None)
             self.history_detail.setHtml("<p>Még nincs naplózott számítás.</p>")
 
     def show_history_detail(self):
@@ -2641,12 +2672,13 @@ class TDMMainWindow(QMainWindow):
         if idx < 0 or idx >= len(rows):
             return
         rec = rows[idx]
+        self.history_table.setProperty("selected_history_record_id", id(rec))
         report_html = "<br>".join(str(rec.get("report", "")).splitlines())
         input_html = "<br>".join(f"<b>{k}</b>: {v}" for k, v in (rec.get("inputs") or {}).items())
         self.history_detail.setHtml(
             f"<h3>{rec.get('drug','')} – {rec.get('method','')}</h3>"
             f"<p><b>Időpont:</b> {rec.get('timestamp','')}<br>"
-            f"<b>Felhasználó:</b> {rec.get('user','—')}<br>"
+            f"<b>Felhasználó:</b> {self.username_for_email(str(rec.get('user','')) or '—')}<br>"
             f"<b>Beteg:</b> {rec.get('patient_id','—')}<br>"
             f"<b>Döntés:</b> {rec.get('decision','—')}</p>"
             f"<h4>Riport</h4><p>{report_html}</p>"
@@ -2697,6 +2729,7 @@ class TDMMainWindow(QMainWindow):
             QMessageBox.information(self, "Nincs kijelölés", "Válassz ki egy korábbi sort.")
             return
         rec = rows[idx]
+        self.history_table.setProperty("selected_history_record_id", id(rec))
         inp = rec.get("inputs") or {}
         if not self.current_user:
             self.user_edit.setText(str(rec.get("user", "")))
@@ -2729,22 +2762,37 @@ class TDMMainWindow(QMainWindow):
 
     def update_selected_history_from_form(self):
         try:
-            rows = self.history_table.property('history_rows') or []
-            idx = self.history_table.currentRow()
-            if idx < 0 or idx >= len(rows):
-                raise ValueError('Válassz ki egy módosítandó sort.')
-            rec = rows[idx]
+            rec = None
+            selected_record_id = self.history_table.property("selected_history_record_id")
+            if selected_record_id:
+                rec = next((item for item in self.history_data if id(item) == selected_record_id), None)
+            if rec is None:
+                rows = self.history_table.property('history_rows') or []
+                selection_model = self.history_table.selectionModel()
+                idx = -1
+                if selection_model is not None:
+                    selected = selection_model.selectedRows()
+                    if selected:
+                        idx = selected[0].row()
+                if idx < 0:
+                    idx = self.history_table.currentRow()
+                if idx < 0 or idx >= len(rows):
+                    raise ValueError('Nincs kijelölt rekord. Válassz ki egy módosítandó sort.')
+                rec = rows[idx]
+                self.history_table.setProperty("selected_history_record_id", id(rec))
             rec_user = str(rec.get('user', '')).strip().lower()
             cur_user = str((self.current_user or {}).get('email', '')).strip().lower()
             is_moderator = bool(self.current_user and self.current_user.get('role') == 'moderator')
             if not self.current_user:
                 raise ValueError('Előbb jelentkezz be.')
-            if not is_moderator and rec_user != cur_user:
+            if not is_moderator and rec_user and rec_user != cur_user:
                 raise ValueError('Csak a saját bejegyzésedet módosíthatod.')
             pk = self.collect_common()
             rec['patient_id'] = pk.get('patient_id', '')
             rec['decision'] = pk.get('decision', '')
             rec['user'] = cur_user or rec_user
+            rec['drug'] = self.antibiotic_combo.currentText().strip() or rec.get('drug', '')
+            rec['method'] = self.method_combo.currentText().strip() or rec.get('method', '')
             rec['inputs'] = {
                 'nem': pk.get('sex'), 'életkor': pk.get('age'), 'testsúly': pk.get('weight'), 'magasság': pk.get('height'),
                 'kreatinin_µmol/L': pk.get('scr_umol'), 'MIC': pk.get('mic'), 'adag_mg': pk.get('dose'),
@@ -2764,7 +2812,7 @@ class TDMMainWindow(QMainWindow):
             self.refresh_history_table()
             QMessageBox.information(self, 'Előző mérések', 'A kijelölt bejegyzés frissítve lett.')
         except Exception as e:
-            QMessageBox.warning(self, 'Mentési hiba', str(e))
+            QMessageBox.warning(self, 'Frissítési hiba', str(e))
 
     def delete_selected_history(self):
         if not self.current_user or self.current_user.get("role") != "moderator":
@@ -3085,7 +3133,7 @@ class TDMMainWindow(QMainWindow):
             raise ValueError("Számítás előtt jelentkezz be hitelesített orvos felhasználóval.")
 
         return {
-            "user": self.current_user.get("email", ""), "patient_id": self.patient_edit.text().strip(),
+            "user": self.normalize_email(self.current_user.get("email", "")), "patient_id": self.patient_edit.text().strip(),
             "decision": self.decision_edit.toPlainText().strip(),
             "sex": sex, "age": age, "weight": weight, "height": height,
             "scr_umol": scr_umol, "scr_mg_dl": scr_mg_dl, "crcl": crcl,

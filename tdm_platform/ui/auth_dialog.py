@@ -31,6 +31,8 @@ class AuthDialog(legacy_ui.AuthDialog):
         self._smtp_store = get_smtp_settings
         self.current_user: Optional[dict] = None
         super().__init__(parent)
+        if hasattr(self, "login_identifier_combo") and self.login_identifier_combo.lineEdit():
+            self.login_identifier_combo.lineEdit().setPlaceholderText("kórházi e-mail")
 
     def _load_users_data(self) -> list[dict]:
         users = self._user_store.load()
@@ -41,6 +43,26 @@ class AuthDialog(legacy_ui.AuthDialog):
 
     def save_users(self):
         self._user_store.save(self.users_data)
+
+    def _login_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        for user in self.users_data:
+            email = str(user.get("email", "")).strip()
+            if email and email not in candidates:
+                candidates.append(email)
+        return candidates
+
+    def resolve_login_identifier(self, raw_value: str) -> str:
+        value = (raw_value or "").strip()
+        if not value:
+            raise ValueError("Add meg a kórházi e-mail címet.")
+        return validate_doctor_email_value(value)
+
+    def register_user(self):
+        super().register_user()
+        email = str(getattr(self, "reg_email_edit", None).text() if hasattr(self, "reg_email_edit") else "").strip().lower()
+        if "@" in email and hasattr(self, "login_identifier_combo"):
+            self.login_identifier_combo.setEditText(email)
 
     def find_user(self, email: str) -> Optional[dict]:
         return super().find_user(email)

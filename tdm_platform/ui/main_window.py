@@ -241,7 +241,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._user_store.save(self.users_data)
 
     def load_history(self) -> list[dict]:
-        return self._history_tab.load_rows()
+        rows = self._history_tab.load_rows()
+        return rows
 
     def save_history(self):
         self._history_tab.save_rows(self.history_data)
@@ -309,25 +310,29 @@ class MainWindow(legacy_ui.TDMMainWindow):
         rows = self.history_table.property("history_rows") or []
         idx = self.history_table.currentRow()
         if 0 <= idx < len(rows):
-            self.history_table.setProperty("selected_history_record_id", id(rows[idx]))
-            print(f"[DEBUG][HISTORY] selected record loaded id={id(rows[idx])}")
+            selected_record_id = str(rows[idx].get("record_id", "")).strip()
+            self.history_table.setProperty("selected_history_record_id", selected_record_id)
+            print(f"[DEBUG][HISTORY] selected record_id={selected_record_id}")
         if hasattr(self, "tabs") and hasattr(self, "input_tab"):
             self.tabs.setCurrentWidget(self.input_tab)
             print("[DEBUG][HISTORY] switched to input tab")
 
     def _resolve_selected_history_record_for_update(self) -> dict:
-        rec = None
-        selected_record_id = self.history_table.property("selected_history_record_id")
-        if selected_record_id:
-            rec = next((item for item in self.history_data if id(item) == selected_record_id), None)
-        if rec is None:
+        selected_record_id = str(self.history_table.property("selected_history_record_id") or "").strip()
+        if not selected_record_id:
             rows = self.history_table.property("history_rows") or []
             idx = self.history_table.currentRow()
             if idx < 0 or idx >= len(rows):
                 raise ValueError("Nincs kijelölt rekord. Válassz ki egy módosítandó sort.")
-            rec = rows[idx]
-            self.history_table.setProperty("selected_history_record_id", id(rec))
-        return rec
+            selected_record_id = str(rows[idx].get("record_id", "")).strip()
+            self.history_table.setProperty("selected_history_record_id", selected_record_id)
+        persisted_ids = [str(item.get("record_id", "")).strip() for item in self.history_data if isinstance(item, dict)]
+        print(f"[DEBUG][HISTORY] persisted record_ids={persisted_ids}")
+        target = next((item for item in self.history_data if str(item.get("record_id", "")).strip() == selected_record_id), None)
+        print(f"[DEBUG][HISTORY] target record found={'yes' if target is not None else 'no'}")
+        if target is None:
+            raise ValueError("A kijelölt rekord nem található a mentendő history listában.")
+        return target
 
     def extract_editable_metadata_from_form(self) -> dict[str, object]:
         mic_raw = self.mic_edit.text().strip()
@@ -354,7 +359,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if not self.current_user:
                 raise ValueError("Előbb jelentkezz be.")
             rec = self._resolve_selected_history_record_for_update()
-            print(f"[DEBUG][HISTORY] updating selected record id={id(rec)}")
+            print(f"[DEBUG][HISTORY] updating selected record_id={rec.get('record_id', '')}")
 
             rec_user = self._normalize_email(rec.get("user", ""))
             cur_user = self._normalize_email((self.current_user or {}).get("email", ""))
@@ -365,27 +370,21 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
             editable = self.extract_editable_metadata_from_form()
             print(f"[DEBUG][HISTORY] editable fields payload={editable}")
-            target_index = next((i for i, item in enumerate(self.history_data) if item is rec), -1)
-            if target_index < 0:
-                target_index = next((i for i, item in enumerate(self.history_data) if id(item) == id(rec)), -1)
-            if target_index < 0:
-                raise ValueError("A kijelölt rekord nem található a mentendő history listában.")
-            target = self.history_data[target_index]
-            print(f"[DEBUG][HISTORY] history record before update={target}")
+            print(f"[DEBUG][HISTORY] history record before update={rec}")
 
-            target["user"] = cur_user or rec_user
-            target["patient_id"] = editable["patient_id"]
-            target["decision"] = editable["decision"]
+            rec["user"] = cur_user or rec_user
+            rec["patient_id"] = editable["patient_id"]
+            rec["decision"] = editable["decision"]
 
-            inputs = dict(target.get("inputs") or {})
+            inputs = dict(rec.get("inputs") or {})
             inputs["MIC"] = editable["mic"]
             inputs["ICU"] = editable["icu"]
             inputs["hematológia"] = editable["hematology"]
             inputs["instabil_vese"] = editable["unstable_renal"]
             inputs["obesitas"] = editable["obesity"]
             inputs["neutropenia"] = editable["neutropenia"]
-            target["inputs"] = inputs
-            print(f"[DEBUG][HISTORY] history record after update={target}")
+            rec["inputs"] = inputs
+            print(f"[DEBUG][HISTORY] history record after update={rec}")
 
             self.save_history()
             print("[DEBUG][HISTORY] history persisted to storage")
@@ -398,6 +397,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             QMessageBox.warning(self, "Frissítési hiba", str(exc))
 
     def logout_user(self):
+        self.logout_to_login()
+
+    def logout_to_login(self):
         confirm = QMessageBox.question(
             self,
             "Kijelentkezés",
@@ -410,7 +412,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.current_user = None
         self.update_user_status_ui()
         self.refresh_history_table()
-        auth = AuthDialog(self)
+        self.hide()
+        auth = AuthDialog()
         if auth.exec() == QDialog.Accepted and auth.current_user:
             self.current_user = dict(auth.current_user)
             self.users_data = ensure_special_roles(self.load_users())
@@ -418,6 +421,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.refresh_history_filter()
             self.refresh_history_table()
             self.update_user_status_ui()
+            self.show()
+            return
+        QApplication.instance().quit()
 
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(

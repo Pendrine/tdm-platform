@@ -4,6 +4,8 @@ import smtplib
 
 from typing import Optional
 
+from PySide6.QtWidgets import QLabel
+
 from tdm_platform.core.auth import UserStore, generate_temp_password, hash_password_value, user_is_active, validate_doctor_email_value
 from tdm_platform.core.models import SMTPSettings
 from tdm_platform.services.smtp_service import get_smtp_settings, send_email
@@ -33,6 +35,9 @@ class AuthDialog(legacy_ui.AuthDialog):
         super().__init__(parent)
         if hasattr(self, "login_identifier_combo") and self.login_identifier_combo.lineEdit():
             self.login_identifier_combo.lineEdit().setPlaceholderText("kórházi e-mail")
+        for label in self.findChildren(QLabel):
+            if label.text().strip().lower() == "felhasználónév / e-mail":
+                label.setText("Kórházi e-mail")
 
     def _load_users_data(self) -> list[dict]:
         users = self._user_store.load()

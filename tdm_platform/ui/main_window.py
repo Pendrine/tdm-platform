@@ -310,8 +310,24 @@ class MainWindow(legacy_ui.TDMMainWindow):
         idx = self.history_table.currentRow()
         if 0 <= idx < len(rows):
             self.history_table.setProperty("selected_history_record_id", id(rows[idx]))
+            print(f"[DEBUG][HISTORY] selected record loaded id={id(rows[idx])}")
         if hasattr(self, "tabs") and hasattr(self, "input_tab"):
             self.tabs.setCurrentWidget(self.input_tab)
+            print("[DEBUG][HISTORY] switched to input tab")
+
+    def _resolve_selected_history_record_for_update(self) -> dict:
+        rec = None
+        selected_record_id = self.history_table.property("selected_history_record_id")
+        if selected_record_id:
+            rec = next((item for item in self.history_data if id(item) == selected_record_id), None)
+        if rec is None:
+            rows = self.history_table.property("history_rows") or []
+            idx = self.history_table.currentRow()
+            if idx < 0 or idx >= len(rows):
+                raise ValueError("Nincs kijelölt rekord. Válassz ki egy módosítandó sort.")
+            rec = rows[idx]
+            self.history_table.setProperty("selected_history_record_id", id(rec))
+        return rec
 
     def extract_editable_metadata_from_form(self) -> dict[str, object]:
         mic_raw = self.mic_edit.text().strip()
@@ -337,17 +353,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         try:
             if not self.current_user:
                 raise ValueError("Előbb jelentkezz be.")
-            rec = None
-            selected_record_id = self.history_table.property("selected_history_record_id")
-            if selected_record_id:
-                rec = next((item for item in self.history_data if id(item) == selected_record_id), None)
-            if rec is None:
-                rows = self.history_table.property("history_rows") or []
-                idx = self.history_table.currentRow()
-                if idx < 0 or idx >= len(rows):
-                    raise ValueError("Nincs kijelölt rekord. Válassz ki egy módosítandó sort.")
-                rec = rows[idx]
-                self.history_table.setProperty("selected_history_record_id", id(rec))
+            rec = self._resolve_selected_history_record_for_update()
+            print(f"[DEBUG][HISTORY] updating selected record id={id(rec)}")
 
             rec_user = self._normalize_email(rec.get("user", ""))
             cur_user = self._normalize_email((self.current_user or {}).get("email", ""))
@@ -357,6 +364,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 raise ValueError("Csak a saját bejegyzésedet módosíthatod.")
 
             editable = self.extract_editable_metadata_from_form()
+            print(f"[DEBUG][HISTORY] editable fields payload={editable}")
             rec["user"] = cur_user or rec_user
             rec["patient_id"] = editable["patient_id"]
             rec["decision"] = editable["decision"]

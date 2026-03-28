@@ -6,6 +6,7 @@ from typing import Optional
 
 from tdm_platform.core.auth import UserStore, generate_temp_password, hash_password_value, user_is_active, validate_doctor_email_value
 from tdm_platform.core.models import SMTPSettings
+from tdm_platform.security.user_signing import verify_user_record
 from tdm_platform.services.smtp_service import get_smtp_settings, send_email
 
 from legacy import tdm_platform_v0_9_3_beta_fixed as legacy_ui
@@ -43,7 +44,12 @@ class AuthDialog(legacy_ui.AuthDialog):
         self._user_store.save(self.users_data)
 
     def find_user(self, email: str) -> Optional[dict]:
-        return super().find_user(email)
+        user = super().find_user(email)
+        if not user:
+            return None
+        if user.get("_signature_valid") is False or not verify_user_record(user):
+            return None
+        return user
 
     def validate_doctor_email(self, email: str) -> str:
         return validate_doctor_email_value(email)

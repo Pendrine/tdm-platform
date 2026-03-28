@@ -22,6 +22,7 @@ _SIGNED_FIELDS = (
     "verified",
     "active",
     "password_hash",
+    "verification_code",
 )
 
 
@@ -46,6 +47,7 @@ def canonicalize_user_record(user: dict[str, Any]) -> str:
         "verified": bool(user.get("verified", False)),
         "active": bool(user.get("active", True)),
         "password_hash": str(user.get("password_hash", "")).strip(),
+        "verification_code": str(user.get("verification_code", "")).strip(),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

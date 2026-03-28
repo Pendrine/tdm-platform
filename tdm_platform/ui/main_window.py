@@ -13,6 +13,7 @@ from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
 from tdm_platform.core.history import HistoryStore
 from tdm_platform.core.models import HistoryRecord, SMTPSettings
+from tdm_platform.core.permissions import can_manage_smtp, can_manage_users
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import calculate as calculate_vancomycin
@@ -102,6 +103,49 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def save_users(self):
         self._user_store.save(self.users_data)
+
+    def _ensure_manage_users_permission(self) -> None:
+        if not can_manage_users(self.current_user):
+            raise ValueError("Ehhez moderátor jogosultság szükséges.")
+
+    def _ensure_manage_smtp_permission(self) -> None:
+        if not can_manage_smtp(self.current_user):
+            raise ValueError("Ehhez moderátor jogosultság szükséges.")
+
+    def set_selected_user_role(self, role: str):
+        try:
+            self._ensure_manage_users_permission()
+            return super().set_selected_user_role(role)
+        except Exception as exc:
+            QMessageBox.warning(self, "Beállítások hiba", str(exc))
+
+    def set_selected_user_active(self, active: bool):
+        try:
+            self._ensure_manage_users_permission()
+            return super().set_selected_user_active(active)
+        except Exception as exc:
+            QMessageBox.warning(self, "Beállítások hiba", str(exc))
+
+    def delete_selected_user(self):
+        try:
+            self._ensure_manage_users_permission()
+            return super().delete_selected_user()
+        except Exception as exc:
+            QMessageBox.warning(self, "Beállítások hiba", str(exc))
+
+    def save_smtp_settings(self):
+        try:
+            self._ensure_manage_smtp_permission()
+            return super().save_smtp_settings()
+        except Exception as exc:
+            QMessageBox.warning(self, "Beállítások hiba", str(exc))
+
+    def test_smtp_settings(self):
+        try:
+            self._ensure_manage_smtp_permission()
+            return super().test_smtp_settings()
+        except Exception as exc:
+            QMessageBox.warning(self, "Beállítások hiba", str(exc))
 
     def load_history(self) -> list[dict]:
         return self._history_tab.load_rows()

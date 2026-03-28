@@ -64,6 +64,42 @@ def test_user_signature_detects_tampering():
     assert not verify_user_record(user)
 
 
+def test_user_signature_covers_verification_code():
+    user = {
+        "name": "Test User",
+        "email": "test@example.com",
+        "username": "test",
+        "password_hash": "hash",
+        "role": "user",
+        "verified": False,
+        "active": True,
+        "verification_code": "ABC123",
+    }
+    user["signature"] = sign_user_record(user)
+    assert verify_user_record(user)
+    user["verification_code"] = "ZZZ999"
+    assert not verify_user_record(user)
+
+
+def test_invalid_signature_record_is_inactive_on_load(tmp_path: Path):
+    path = tmp_path / "users.json"
+    tampered = {
+        "name": "Tampered",
+        "email": "tampered@example.com",
+        "username": "tampered",
+        "password_hash": "hash",
+        "role": "moderator",
+        "verified": True,
+        "active": True,
+        "signature": "deadbeef",
+    }
+    save_json(path, [tampered])
+    loaded = UserStore(path).load()
+    record = next(u for u in loaded if u.get("email") == "tampered@example.com")
+    assert record.get("active") is False
+    assert record.get("_signature_valid") is False
+
+
 def test_history_store_appends_metadata(tmp_path: Path):
     store = HistoryStore(tmp_path / "history.json")
     rows = store.append(

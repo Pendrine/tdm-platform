@@ -335,12 +335,16 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 raise ValueError("Csak a saját bejegyzésedet módosíthatod.")
 
             pk = self.collect_common()
-            rec["patient_id"] = pk.get("patient_id", "")
-            rec["decision"] = pk.get("decision", "")
-            rec["user"] = cur_user or rec_user
-            rec["drug"] = self.antibiotic_combo.currentText().strip() or rec.get("drug", "")
-            rec["method"] = self.method_combo.currentText().strip() or rec.get("method", "")
-            rec["inputs"] = {
+            updated_fields = {
+                "user": cur_user or rec_user,
+                "patient_id": pk.get("patient_id", ""),
+                "drug": self.antibiotic_combo.currentText().strip() or rec.get("drug", ""),
+                "method": self.method_combo.currentText().strip() or rec.get("method", ""),
+                "status": (self.results or {}).get("status", rec.get("status", "")),
+                "regimen": (self.results or {}).get("regimen", rec.get("regimen", "")),
+                "decision": pk.get("decision", ""),
+                "report": (self.results or {}).get("report", rec.get("report", "")),
+                "inputs": {
                 "nem": pk.get("sex"),
                 "életkor": pk.get("age"),
                 "testsúly": pk.get("weight"),
@@ -361,13 +365,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "instabil_vese": pk.get("unstable_renal"),
                 "obesitas": pk.get("obesity"),
                 "neutropenia": pk.get("neutropenia"),
+                },
             }
-            if self.latest_report and self.results:
-                rec["drug"] = self.results.get("drug", rec.get("drug", ""))
-                rec["method"] = self.results.get("method", rec.get("method", ""))
-                rec["status"] = self.results.get("status", rec.get("status", ""))
-                rec["regimen"] = self.results.get("regimen", rec.get("regimen", ""))
-                rec["report"] = self.results.get("report", rec.get("report", ""))
+            rec.update(updated_fields)
             self.save_history()
             self.refresh_history_filter()
             self.refresh_history_table()

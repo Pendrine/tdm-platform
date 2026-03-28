@@ -42,6 +42,20 @@ class AuthDialog(legacy_ui.AuthDialog):
     def save_users(self):
         self._user_store.save(self.users_data)
 
+    def _login_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        for user in self.users_data:
+            email = str(user.get("email", "")).strip()
+            if email and email not in candidates:
+                candidates.append(email)
+        return candidates
+
+    def resolve_login_identifier(self, raw_value: str) -> str:
+        value = (raw_value or "").strip()
+        if not value:
+            raise ValueError("Add meg a kórházi e-mail címet.")
+        return validate_doctor_email_value(value)
+
     def find_user(self, email: str) -> Optional[dict]:
         return super().find_user(email)
 

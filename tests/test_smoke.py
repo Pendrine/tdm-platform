@@ -12,6 +12,7 @@ from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as cal
 from tdm_platform.services.pdf_service import _wrap_text
 from tdm_platform.services.smtp_service import SMTPSettingsStore
 from tdm_platform.storage.json_store import load_json_dict, save_json
+from tdm_platform.security.user_signing import sign_user_record, verify_user_record
 import pytest
 
 
@@ -45,6 +46,22 @@ def test_role_from_json_is_not_authoritative(tmp_path: Path):
     assert resolve_user_role(attacker) == "user"
     assert attacker["role"] == "user"
     assert not is_moderator(attacker)
+
+
+def test_user_signature_detects_tampering():
+    user = {
+        "name": "Test User",
+        "email": "test@example.com",
+        "username": "test",
+        "password_hash": "hash",
+        "role": "user",
+        "verified": True,
+        "active": True,
+    }
+    user["signature"] = sign_user_record(user)
+    assert verify_user_record(user)
+    user["active"] = False
+    assert not verify_user_record(user)
 
 
 def test_history_store_appends_metadata(tmp_path: Path):

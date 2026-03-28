@@ -8,6 +8,7 @@ from datetime import datetime
 
 from tdm_platform.core.models import User
 from tdm_platform.core.roles import resolve_user_role
+from tdm_platform.security.user_signing import attach_signature, verify_user_record
 from tdm_platform.storage.json_store import load_json_list, save_json
 from tdm_platform.storage.paths import USERS_PATH
 
@@ -49,9 +50,20 @@ def user_is_active(user: dict | None) -> bool:
     return bool(user) and user.get("active", True) is not False
 
 
-def ensure_special_roles(users: list[dict]) -> list[dict]:
+def ensure_special_roles(users: list[dict], enforce_signature: bool = True) -> list[dict]:
     found = False
     for user in users:
+        signature_ok = verify_user_record(user) if enforce_signature else bool(user.get("_signature_valid", True))
+        if enforce_signature and not signature_ok:
+            logger.warning(
+                "Invalid or missing user signature for %s. Record marked inactive.",
+                normalize_email_value(user.get("email", "")) or "unknown-user",
+            )
+            user["active"] = False
+            user["_signature_valid"] = False
+        else:
+            user["_signature_valid"] = True
+
         email = normalize_email_value(user.get("email", ""))
         plaintext = str(user.pop("password", "")).strip()
         if plaintext and not str(user.get("password_hash", "")).strip():
@@ -67,21 +79,20 @@ def ensure_special_roles(users: list[dict]) -> list[dict]:
             )
         user["role"] = expected_role
         if email == MAIN_MODERATOR_EMAIL:
-            found = True
+            found = bool(user.get("_signature_valid", False))
     if not found:
-        users.append(
-            asdict(
-                User(
-                    name="Dr. Visnyovszki Ádám",
-                    email=MAIN_MODERATOR_EMAIL,
-                    username=MAIN_MODERATOR_EMAIL.split("@")[0],
-                    password_hash=hash_password_value("ChangeMe123!"),
-                    role="moderator",
-                    verified=True,
-                    verified_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                )
+        bootstrap = asdict(
+            User(
+                name="Dr. Visnyovszki Ádám",
+                email=MAIN_MODERATOR_EMAIL,
+                username=MAIN_MODERATOR_EMAIL.split("@")[0],
+                password_hash=hash_password_value("ChangeMe123!"),
+                role="moderator",
+                verified=True,
+                verified_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             )
         )
+        users.append(attach_signature(bootstrap))
     return users
 
 
@@ -90,7 +101,8 @@ class UserStore:
         self.path = path
 
     def load(self) -> list[dict]:
-        return ensure_special_roles(load_json_list(self.path))
+        return ensure_special_roles(load_json_list(self.path), enforce_signature=True)
 
     def save(self, users: list[dict]) -> None:
-        save_json(self.path, ensure_special_roles(users))
+        normalized = ensure_special_roles(users, enforce_signature=False)
+        save_json(self.path, [attach_signature(user) for user in normalized])

@@ -4,6 +4,8 @@ from tdm_platform import app_meta
 from tdm_platform.core.auth import UserStore, generate_temp_password, validate_doctor_email_value
 from tdm_platform.core.history import HistoryStore
 from tdm_platform.core.models import HistoryRecord, SMTPSettings
+from tdm_platform.core.permissions import is_moderator
+from tdm_platform.core.roles import resolve_user_role
 from tdm_platform.pk.amikacin_engine import AmikacinInputs, calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import LinezolidInputs, calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as calculate_vancomycin
@@ -24,6 +26,25 @@ def test_user_store_ensures_moderator(tmp_path: Path):
     assert any(user["role"] == "moderator" for user in users)
     assert validate_doctor_email_value("Visnyo.Adam@gmail.com") == "visnyo.adam@gmail.com"
     assert len(generate_temp_password()) == 12
+
+
+def test_role_from_json_is_not_authoritative(tmp_path: Path):
+    store = UserStore(tmp_path / "users.json")
+    users = [
+        {
+            "name": "Attacker",
+            "email": "attacker@example.com",
+            "username": "attacker",
+            "password_hash": "x",
+            "role": "moderator",
+        }
+    ]
+    store.save(users)
+    loaded = store.load()
+    attacker = next(u for u in loaded if u.get("email") == "attacker@example.com")
+    assert resolve_user_role(attacker) == "user"
+    assert attacker["role"] == "user"
+    assert not is_moderator(attacker)
 
 
 def test_history_store_appends_metadata(tmp_path: Path):

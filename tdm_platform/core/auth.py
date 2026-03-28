@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from dataclasses import asdict
 from datetime import datetime
 
 from tdm_platform.core.models import User
+from tdm_platform.core.roles import resolve_user_role
 from tdm_platform.storage.json_store import load_json_list, save_json
 from tdm_platform.storage.paths import USERS_PATH
 
 ALLOWED_EMAIL_DOMAIN = "dpckorhaz.hu"
 ALLOWED_TEST_EMAILS = {"visnyo.adam@gmail.com"}
 MAIN_MODERATOR_EMAIL = "visnyovszki.adam@dpckorhaz.hu"
+logger = logging.getLogger(__name__)
 
 
 def normalize_email_value(email: str) -> str:
@@ -53,11 +56,18 @@ def ensure_special_roles(users: list[dict]) -> list[dict]:
         plaintext = str(user.pop("password", "")).strip()
         if plaintext and not str(user.get("password_hash", "")).strip():
             user["password_hash"] = hash_password_value(plaintext)
+        expected_role = resolve_user_role(user)
+        original_role = str(user.get("role", "")).strip().lower()
+        if original_role and original_role != expected_role:
+            logger.warning(
+                "JSON role mismatch for %s: stored=%s resolved=%s",
+                email or "unknown-user",
+                original_role,
+                expected_role,
+            )
+        user["role"] = expected_role
         if email == MAIN_MODERATOR_EMAIL:
-            user["role"] = "moderator"
             found = True
-        else:
-            user.setdefault("role", "orvos")
     if not found:
         users.append(
             asdict(

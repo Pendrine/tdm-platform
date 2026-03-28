@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from tdm_platform.core.roles import resolve_user_role
+
 
 UserLike = Mapping[str, Any] | None
 
 
 def role_of(user: UserLike) -> str:
-    return str((user or {}).get("role", "")).strip().lower()
+    return resolve_user_role(user)
 
 
 def is_moderator(user: UserLike) -> bool:

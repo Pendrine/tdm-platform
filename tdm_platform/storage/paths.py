@@ -1,44 +1,73 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import os
+import sys
 from pathlib import Path
 
 
-@dataclass(frozen=True)
-class StoragePaths:
-    app_base_dir: Path
-    data_dir: Path
-    xlsx_candidates: tuple[Path, ...]
-    xlsx_path: Path
-    users_path: Path
-    history_path: Path
-    infectologists_path: Path
-    settings_path: Path
+logger = logging.getLogger(__name__)
 
 
-APP_BASE_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = APP_BASE_DIR / "tdm_platform_data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+def get_base_dir() -> Path:
+    """Return executable/script directory used as storage base."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+
+    main_module = sys.modules.get("__main__")
+    main_file = getattr(main_module, "__file__", None)
+    if main_file:
+        return Path(main_file).resolve().parent
+
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0:
+        return Path(argv0).resolve().parent
+
+    return Path.cwd().resolve()
+
+
+def _ensure_dir(path: Path) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"A könyvtár nem hozható létre: {path}") from exc
+
+    if not os.access(path, os.W_OK):
+        raise RuntimeError(f"A könyvtár nem írható: {path}")
+    return path
+
+
+def get_data_dir() -> Path:
+    return _ensure_dir(get_base_dir() / "data")
+
+
+def get_exports_dir() -> Path:
+    return _ensure_dir(get_data_dir() / "exports")
+
+
+def get_data_file(name: str) -> Path:
+    if not name or Path(name).is_absolute():
+        raise ValueError("A data fájlnév relatív és nem üres kell legyen.")
+    target = (get_data_dir() / name).resolve()
+    data_root = get_data_dir().resolve()
+    if data_root not in target.parents and target != data_root:
+        raise ValueError("A data fájl csak a data könyvtáron belül lehet.")
+    return target
+
+
+APP_BASE_DIR = get_base_dir()
+DATA_DIR = get_data_dir()
+EXPORTS_DIR = get_exports_dir()
 
 XLSX_CANDIDATES = (
     APP_BASE_DIR / "Új Microsoft Excel-munkalap.xlsx",
     DATA_DIR / "Új Microsoft Excel-munkalap.xlsx",
-    Path.home() / "Downloads" / "Új Microsoft Excel-munkalap.xlsx",
 )
-
 XLSX_PATH = next((path for path in XLSX_CANDIDATES if path.exists()), XLSX_CANDIDATES[0])
-USERS_PATH = DATA_DIR / "tdm_users.json"
-HISTORY_PATH = DATA_DIR / "tdm_history.json"
-INFECTOLOGISTS_PATH = DATA_DIR / "tdm_infectologists.json"
-SETTINGS_PATH = DATA_DIR / "tdm_settings.json"
 
-PATHS = StoragePaths(
-    app_base_dir=APP_BASE_DIR,
-    data_dir=DATA_DIR,
-    xlsx_candidates=XLSX_CANDIDATES,
-    xlsx_path=XLSX_PATH,
-    users_path=USERS_PATH,
-    history_path=HISTORY_PATH,
-    infectologists_path=INFECTOLOGISTS_PATH,
-    settings_path=SETTINGS_PATH,
-)
+USERS_PATH = get_data_file("tdm_users.json")
+HISTORY_PATH = get_data_file("tdm_history.json")
+INFECTOLOGISTS_PATH = get_data_file("tdm_infectologists.json")
+SETTINGS_PATH = get_data_file("tdm_settings.json")
+
+logger.info("Active TDM data directory: %s", DATA_DIR)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import sys
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
@@ -15,6 +17,7 @@ from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import calculate as calculate_vancomycin
 from tdm_platform.services.pdf_service import render_simple_report_pdf
 from tdm_platform.services.smtp_service import SMTPSettingsStore, get_smtp_settings
+from tdm_platform.storage.paths import DATA_DIR, EXPORTS_DIR, HISTORY_PATH, INFECTOLOGISTS_PATH, SETTINGS_PATH, USERS_PATH, XLSX_PATH
 from tdm_platform.ui.auth_dialog import AuthDialog
 from tdm_platform.ui.components.status_bar import AppStatusBar
 from tdm_platform.ui.history_tab import HistoryTabController
@@ -62,6 +65,21 @@ def _save_settings_file(settings: dict[str, object]) -> None:
         )
     )
 
+
+
+
+def _default_export_name(prefix: str, suffix: str) -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{prefix}_{stamp}{suffix}"
+
+
+def _pick_export_path(window: MainWindow, title: str, default_name: str, file_filter: str) -> str:
+    default_target = str(EXPORTS_DIR / default_name)
+    selected, _ = QFileDialog.getSaveFileName(window, title, default_target, file_filter)
+    if not selected:
+        return ""
+    selected_path = Path(selected)
+    return str(EXPORTS_DIR / selected_path.name)
 
 class MainWindow(legacy_ui.TDMMainWindow):
     """Main window facade with modular dependencies wired into the legacy UI."""
@@ -149,8 +167,54 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.refresh_history_filter()
         self.refresh_history_table()
 
+    def save_report_pdf(self):
+        if not self.latest_report or not self.results:
+            QMessageBox.information(self, "Nincs riport", "Előbb számolj egy eredményt.")
+            return
+        path = _pick_export_path(self, "PDF riport mentése", _default_export_name("tdm_riport", ".pdf"), "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            self._render_report_pdf_to_path(path)
+            out = Path(path)
+            if not out.exists() or out.stat().st_size == 0:
+                raise RuntimeError("A PDF fájl nem jött létre, vagy üres maradt.")
+            self.export_status.setText(f"PDF mentve: {path}")
+            QMessageBox.information(self, "PDF mentés", f"A riport PDF-be mentve:\n{path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "PDF export hiba", str(exc))
+
+    def save_report_txt(self):
+        if not self.latest_report:
+            QMessageBox.information(self, "Nincs riport", "Előbb számolj egy eredményt.")
+            return
+        path = _pick_export_path(self, "TXT riport mentése", _default_export_name("tdm_riport", ".txt"), "Szövegfájl (*.txt)")
+        if not path:
+            return
+        if not path.lower().endswith(".txt"):
+            path += ".txt"
+        Path(path).write_text(self.latest_report, encoding="utf-8")
+        self.export_status.setText(f"TXT mentve: {path}")
+
+    def save_result_json(self):
+        if not self.results:
+            QMessageBox.information(self, "Nincs eredmény", "Előbb számolj egy eredményt.")
+            return
+        path = _pick_export_path(self, "JSON mentése", _default_export_name("tdm_eredmeny", ".json"), "JSON (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        with Path(path).open("w", encoding="utf-8") as file:
+            json.dump(self.results, file, ensure_ascii=False, indent=2, default=str)
+        self.export_status.setText(f"JSON mentve: {path}")
+
 
 def run_app() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s - %(message)s")
+    logging.getLogger(__name__).info("Storage data directory: %s", DATA_DIR)
     app = QApplication(sys.argv)
     auth = AuthDialog()
     if auth.exec() != QDialog.Accepted or not auth.current_user:
@@ -159,6 +223,13 @@ def run_app() -> int:
     window.show()
     return app.exec()
 
+
+legacy_ui.DATA_DIR = str((USERS_PATH.parent))
+legacy_ui.USERS_PATH = str(USERS_PATH)
+legacy_ui.HISTORY_PATH = str(HISTORY_PATH)
+legacy_ui.INFECTOLOGISTS_PATH = str(INFECTOLOGISTS_PATH)
+legacy_ui.SETTINGS_PATH = str(SETTINGS_PATH)
+legacy_ui.XLSX_PATH = str(XLSX_PATH)
 
 legacy_ui.ensure_special_roles = ensure_special_roles
 legacy_ui.load_users_file = lambda: UserStore().load()

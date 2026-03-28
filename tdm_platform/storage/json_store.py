@@ -21,11 +21,14 @@ def load_json(path: Path, default: Any):
 
 
 def save_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-        json.dump(data, tmp, ensure_ascii=False, indent=2, default=str)
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+            json.dump(data, tmp, ensure_ascii=False, indent=2, default=str)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
+    except OSError as exc:
+        raise RuntimeError(f"Nem sikerült menteni a fájlt: {path}") from exc
 
 
 def load_json_list(path: Path) -> JSONList:

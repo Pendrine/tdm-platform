@@ -50,6 +50,9 @@ def ensure_special_roles(users: list[dict]) -> list[dict]:
     found = False
     for user in users:
         email = normalize_email_value(user.get("email", ""))
+        plaintext = str(user.pop("password", "")).strip()
+        if plaintext and not str(user.get("password_hash", "")).strip():
+            user["password_hash"] = hash_password_value(plaintext)
         if email == MAIN_MODERATOR_EMAIL:
             user["role"] = "moderator"
             found = True

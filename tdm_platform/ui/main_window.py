@@ -365,24 +365,59 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
             editable = self.extract_editable_metadata_from_form()
             print(f"[DEBUG][HISTORY] editable fields payload={editable}")
-            rec["user"] = cur_user or rec_user
-            rec["patient_id"] = editable["patient_id"]
-            rec["decision"] = editable["decision"]
+            target_index = next((i for i, item in enumerate(self.history_data) if item is rec), -1)
+            if target_index < 0:
+                target_index = next((i for i, item in enumerate(self.history_data) if id(item) == id(rec)), -1)
+            if target_index < 0:
+                raise ValueError("A kijelölt rekord nem található a mentendő history listában.")
+            target = self.history_data[target_index]
+            print(f"[DEBUG][HISTORY] history record before update={target}")
 
-            inputs = dict(rec.get("inputs") or {})
+            target["user"] = cur_user or rec_user
+            target["patient_id"] = editable["patient_id"]
+            target["decision"] = editable["decision"]
+
+            inputs = dict(target.get("inputs") or {})
             inputs["MIC"] = editable["mic"]
             inputs["ICU"] = editable["icu"]
             inputs["hematológia"] = editable["hematology"]
             inputs["instabil_vese"] = editable["unstable_renal"]
             inputs["obesitas"] = editable["obesity"]
             inputs["neutropenia"] = editable["neutropenia"]
-            rec["inputs"] = inputs
+            target["inputs"] = inputs
+            print(f"[DEBUG][HISTORY] history record after update={target}")
+
             self.save_history()
+            print("[DEBUG][HISTORY] history persisted to storage")
+            self.history_data = self.load_history()
+            print(f"[DEBUG][HISTORY] history reloaded from storage rows={len(self.history_data)}")
             self.refresh_history_filter()
             self.refresh_history_table()
             QMessageBox.information(self, "Előző mérések", "A kijelölt bejegyzés frissítve lett.")
         except Exception as exc:
             QMessageBox.warning(self, "Frissítési hiba", str(exc))
+
+    def logout_user(self):
+        confirm = QMessageBox.question(
+            self,
+            "Kijelentkezés",
+            "Biztosan kijelentkezel?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.current_user = None
+        self.update_user_status_ui()
+        self.refresh_history_table()
+        auth = AuthDialog(self)
+        if auth.exec() == QDialog.Accepted and auth.current_user:
+            self.current_user = dict(auth.current_user)
+            self.users_data = ensure_special_roles(self.load_users())
+            self.history_data = self.load_history()
+            self.refresh_history_filter()
+            self.refresh_history_table()
+            self.update_user_status_ui()
 
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(

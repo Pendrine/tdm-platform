@@ -89,8 +89,22 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._history_store = HistoryStore()
         self._history_tab = HistoryTabController(self._history_store)
         super().__init__(current_user=current_user)
+        self._configure_history_toolbar_buttons()
         self.setWindowTitle(APP_NAME)
         self.setStatusBar(AppStatusBar(self))
+
+    def _configure_history_toolbar_buttons(self) -> None:
+        if hasattr(self, "clear_form_btn"):
+            self.clear_form_btn.setText("Űrlap betöltése")
+        if hasattr(self, "save_history_changes_btn"):
+            self.save_history_changes_btn.setText("Kijelölt sor frissítése")
+        if hasattr(self, "delete_history_btn"):
+            self.delete_history_btn.setText("Törlés")
+        for name in ("reload_history_btn", "save_history_btn", "new_save_btn", "save_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setVisible(False)
+                button.setEnabled(False)
 
     def _rebind_storage_backed_stores(self) -> None:
         self._user_store = UserStore()
@@ -257,7 +271,6 @@ class MainWindow(legacy_ui.TDMMainWindow):
         rows = self.history_table.property("history_rows") or []
         idx = self.history_table.currentRow()
         if 0 <= idx < len(rows):
-            self.history_table.setProperty("selected_history_record_id", id(rows[idx]))
             self._history_tab.render_detail(self.history_detail, rows[idx], username_resolver=self._username_for_email)
 
     def update_user_status_ui(self):
@@ -316,8 +329,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
             rec_user = self._normalize_email(rec.get("user", ""))
             cur_user = self._normalize_email((self.current_user or {}).get("email", ""))
-            is_moderator = bool(self.current_user and self.current_user.get("role") == "moderator")
-            if not is_moderator and rec_user and rec_user != cur_user:
+            role = str((self.current_user or {}).get("role", "")).strip().lower()
+            can_edit_all = role in {"moderator", "infektologus"}
+            if not can_edit_all and rec_user and rec_user != cur_user:
                 raise ValueError("Csak a saját bejegyzésedet módosíthatod.")
 
             pk = self.collect_common()
@@ -396,6 +410,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             },
         )
         self.history_data = self._history_store.append(record)
+        if hasattr(self, "history_table"):
+            self.history_table.setProperty("selected_history_record_id", None)
         self.refresh_history_filter()
         self.refresh_history_table()
 

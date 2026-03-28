@@ -74,7 +74,6 @@ class HistoryTabController:
                 table.setItem(i, j, QTableWidgetItem(str(value)))
         if rows:
             table.selectRow(0)
-            table.setProperty("selected_history_record_id", id(rows[0]))
         else:
             table.setProperty("selected_history_record_id", None)
             detail.setHtml("<p>Még nincs naplózott számítás.</p>")

@@ -1,5 +1,4 @@
 PySide6
-PySide6-WebEngine
 plotly
 openpyxl
 reportlab>=4.0

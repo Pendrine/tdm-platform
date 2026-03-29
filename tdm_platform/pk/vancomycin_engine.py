@@ -157,21 +157,35 @@ def calculate(inp: VancomycinInputs) -> dict:
         history_rows=inp.history_rows or [],
     )
     best = workflow["best"]
-    cl_used = best.cl_l_h
-    vd_used = best.vd_l
-    pred_peak = max(best.predicted_concentrations)
-    pred_trough = min(best.predicted_concentrations)
-    pred_auc24 = best.auc24
-    pred_ke = cl_used / vd_used
-    pred_half_life = math.log(2) / pred_ke
+    auto = workflow["auto_selection"]
+    classical_forced = inp.selected_model_key == "trapezoid_classic" or inp.method == "Klasszikus"
+    classical_auto = inp.method == "Auto" and auto.trapezoid_eligible and not auto.bayesian_preferred
+    use_classical = classical_forced or classical_auto
+    if use_classical:
+        cl_used = base["cl_l_h"]
+        vd_used = base["vd_l"]
+        pred_peak = base["true_peak"]
+        pred_trough = base["true_trough"]
+        pred_auc24 = base["auc24"]
+        pred_ke = base["ke"]
+        pred_half_life = base["half_life"]
+        selected_model_key = "trapezoid_classic"
+    else:
+        cl_used = best.cl_l_h
+        vd_used = best.vd_l
+        pred_peak = max(best.predicted_concentrations)
+        pred_trough = min(best.predicted_concentrations)
+        pred_auc24 = best.auc24
+        pred_ke = cl_used / vd_used
+        pred_half_life = math.log(2) / pred_ke
+        selected_model_key = workflow["final"].selected_model_key
     crcl = workflow["crcl"]
-    selected_model_key = workflow["final"].selected_model_key
     auto_selection = {
-        "recommended_model_key": workflow["auto_selection"].recommended_model_key,
-        "alternative_model_keys": list(workflow["auto_selection"].alternative_model_keys),
-        "rationale": workflow["auto_selection"].rationale,
-        "bayesian_preferred": workflow["auto_selection"].bayesian_preferred,
-        "trapezoid_eligible": workflow["auto_selection"].trapezoid_eligible,
+        "recommended_model_key": auto.recommended_model_key,
+        "alternative_model_keys": list(auto.alternative_model_keys),
+        "rationale": auto.rationale,
+        "bayesian_preferred": auto.bayesian_preferred,
+        "trapezoid_eligible": auto.trapezoid_eligible,
     }
     fit_summary = [
         {

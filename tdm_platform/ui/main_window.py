@@ -148,6 +148,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._build_visualization_tab()
         self._build_episode_events_panel()
         self._add_relative_reference_field()
+        self._add_loading_and_dosecount_fields()
         self._extend_flag_controls()
         self._set_default_sampling_datetimes()
         self._remove_input_context_block()
@@ -206,9 +207,29 @@ class MainWindow(legacy_ui.TDMMainWindow):
             getattr(self, "level2_rel_edit", None),
             getattr(self, "t1_edit", None),
             getattr(self, "t2_edit", None),
+            getattr(self, "loading_dose_edit", None),
+            getattr(self, "loading_time_edit", None),
+            getattr(self, "dose_count_edit", None),
         ]:
             if edit is not None and hasattr(edit, "editingFinished"):
                 edit.editingFinished.connect(self._sync_input_panel_to_episode_events)
+
+    def _add_loading_and_dosecount_fields(self) -> None:
+        form = self.dose_edit.parentWidget().layout() if hasattr(self, "dose_edit") else None
+        if not isinstance(form, QFormLayout):
+            return
+        if not hasattr(self, "loading_dose_edit"):
+            self.loading_dose_edit = QLineEdit()
+            self.loading_dose_edit.setPlaceholderText("pl. 1500")
+            form.addRow("Loading dose (mg)", self.loading_dose_edit)
+        if not hasattr(self, "loading_time_edit"):
+            self.loading_time_edit = QLineEdit()
+            self.loading_time_edit.setPlaceholderText("t0 előtt hány órával (negatív lehet)")
+            form.addRow("Loading ideje (óra)", self.loading_time_edit)
+        if not hasattr(self, "dose_count_edit"):
+            self.dose_count_edit = QLineEdit()
+            self.dose_count_edit.setPlaceholderText("pl. 3")
+            form.addRow("Eddigi dózisszám", self.dose_count_edit)
 
     def _remove_input_context_block(self) -> None:
         if hasattr(self, "quick_context") and self.quick_context is not None:
@@ -383,6 +404,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.auto_select_browser = QTextBrowser()
         self.model_override_combo = QComboBox()
         self.model_override_combo.addItem("Automatikus javaslat", "")
+        self.model_override_combo.addItem("Klasszikus trapezoid (steady-state)", "trapezoid_classic")
         for model in MODELS:
             self.model_override_combo.addItem(model.label, model.key)
         self.model_override_combo.currentIndexChanged.connect(self._on_manual_model_override_changed)
@@ -591,6 +613,22 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.episode_events_table.setItem(sample_rows[0], 4, QTableWidgetItem(self.level1_rel_edit.text().strip()))
         self.episode_events_table.setItem(sample_rows[1], 0, QTableWidgetItem(self.t2_edit.text().strip()))
         self.episode_events_table.setItem(sample_rows[1], 4, QTableWidgetItem(self.level2_rel_edit.text().strip()))
+        # Loading dose row (optional)
+        loading_value = self.loading_dose_edit.text().strip() if hasattr(self, "loading_dose_edit") else ""
+        if loading_value:
+            loading_time = self.loading_time_edit.text().strip() if hasattr(self, "loading_time_edit") else "-12"
+            for r in range(self.episode_events_table.rowCount()):
+                cell = self.episode_events_table.item(r, 1)
+                if cell and "loading" in cell.text().strip().lower():
+                    self.episode_events_table.setItem(r, 0, QTableWidgetItem(loading_time))
+                    self.episode_events_table.setItem(r, 2, QTableWidgetItem(loading_value))
+                    break
+            else:
+                self._append_episode_event("loading_dose")
+                r = self.episode_events_table.rowCount() - 1
+                self.episode_events_table.setItem(r, 1, QTableWidgetItem("loading dose"))
+                self.episode_events_table.setItem(r, 0, QTableWidgetItem(loading_time))
+                self.episode_events_table.setItem(r, 2, QTableWidgetItem(loading_value))
         # MIC and creatinine rows (upsert).
         def _upsert_row(label: str, col: int, value: str) -> None:
             for r in range(self.episode_events_table.rowCount()):
@@ -641,6 +679,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "tinf": self._safe_required_float(self.tinf_edit.text(), "Infúziós idő"),
             "target_auc": self._safe_optional_float(self.target_auc_edit.text()) or 500.0,
             "rounding": self._safe_optional_float(self.rounding_edit.text()) or 250.0,
+            "loading_dose": self._safe_optional_float(self.loading_dose_edit.text()) if hasattr(self, "loading_dose_edit") else None,
+            "loading_time_h": self._safe_optional_float(self.loading_time_edit.text()) if hasattr(self, "loading_time_edit") else None,
+            "dose_count": int(self._safe_optional_float(self.dose_count_edit.text()) or 0) if hasattr(self, "dose_count_edit") else 0,
             "c1": self._safe_required_float(self.level1_rel_edit.text(), "1. szint"),
             "c2": self._safe_required_float(self.level2_rel_edit.text(), "2. szint"),
             "c3": self._safe_optional_float(self.level3_edit.text()),
@@ -658,7 +699,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         payload["episode_events"] = self._collect_episode_events()
         payload["hsct"] = bool(self.hsct_check.isChecked()) if hasattr(self, "hsct_check") else False
         payload["arc"] = bool(self.arc_check.isChecked()) if hasattr(self, "arc_check") else False
-        payload["dose_number"] = len([e for e in payload["episode_events"] if "dose" in str(e.get("event_type", "")).lower()]) or 1
+        payload["dose_number"] = payload.get("dose_count") or len([e for e in payload["episode_events"] if "dose" in str(e.get("event_type", "")).lower()]) or 1
         sample_events = []
         dose_events = []
         for event in payload["episode_events"]:
@@ -1433,6 +1474,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "neutropenia": pk.get("neutropenia"),
                 "hsct": pk.get("hsct"),
                 "arc": pk.get("arc"),
+                "loading_dose": pk.get("loading_dose"),
+                "loading_time_h": pk.get("loading_time_h"),
+                "dose_count": pk.get("dose_count"),
                 "episode_events": pk.get("episode_events", []),
                 "selected_model_key": res.get("pk", {}).get("selected_model_key"),
                 "auto_selection": res.get("pk", {}).get("auto_selection"),

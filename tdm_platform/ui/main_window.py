@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -215,8 +216,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
             getattr(self, "loading_time_edit", None),
             getattr(self, "dose_count_edit", None),
         ]:
-            if edit is not None and hasattr(edit, "editingFinished"):
+            if edit is None:
+                continue
+            if hasattr(edit, "editingFinished"):
                 edit.editingFinished.connect(self._sync_input_panel_to_episode_events)
+            if hasattr(edit, "textChanged"):
+                edit.textChanged.connect(lambda *_: self._sync_input_panel_to_episode_events())
 
     def _add_loading_and_dosecount_fields(self) -> None:
         form = self.dose_edit.parentWidget().layout() if hasattr(self, "dose_edit") else None
@@ -304,6 +309,34 @@ class MainWindow(legacy_ui.TDMMainWindow):
         layout.addWidget(self.episode_events_table)
         parent_layout.addWidget(box, 2)
 
+    @staticmethod
+    def _event_type_options() -> list[tuple[str, str]]:
+        return [
+            ("maintenance dose", "maintenance dose"),
+            ("loading dose", "loading dose"),
+            ("extra dose", "extra dose"),
+            ("sample", "sample"),
+            ("MIC result", "mic result"),
+            ("creatinine result", "creatinine result"),
+        ]
+
+    def _set_event_type_widget(self, row: int, event_type: str) -> None:
+        if not hasattr(self, "episode_events_table"):
+            return
+        combo = QComboBox()
+        for label, value in self._event_type_options():
+            combo.addItem(label, value)
+        normalized = str(event_type or "").strip().lower().replace("_", " ")
+        idx = combo.findData(normalized)
+        if idx < 0:
+            for i in range(combo.count()):
+                if combo.itemText(i).strip().lower() == normalized:
+                    idx = i
+                    break
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.currentIndexChanged.connect(lambda *_: self._sync_inputs_from_event_table(None))
+        self.episode_events_table.setCellWidget(row, 1, combo)
+
     def _add_relative_reference_field(self) -> None:
         if hasattr(self, "relative_reference_dt"):
             return
@@ -340,6 +373,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             flags_layout.addRow("", self.arc_check)
 
     def _append_episode_event(self, event_type: str) -> None:
+        previous_lock = getattr(self, "_sync_from_table_lock", False)
         self._sync_from_table_lock = True
         row = self.episode_events_table.rowCount()
         self.episode_events_table.insertRow(row)
@@ -352,15 +386,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "creatinine_result": ["0.0", "creatinine result", "", "", "", "", self.scr_edit.text().strip() or "90", ""],
         }.get(event_type, ["", event_type, "", "", "", "", "", ""])
         for col, val in enumerate(values):
-            self.episode_events_table.setItem(row, col, QTableWidgetItem(val))
-        self._sync_from_table_lock = False
+            if col == 1:
+                self._set_event_type_widget(row, val)
+            else:
+                self.episode_events_table.setItem(row, col, QTableWidgetItem(val))
+        self._sync_from_table_lock = previous_lock
 
     def _delete_selected_event(self) -> None:
         row = self.episode_events_table.currentRow()
         if row >= 0:
             self.episode_events_table.removeRow(row)
 
-    def _sync_inputs_from_event_table(self, _item: QTableWidgetItem) -> None:
+    def _sync_inputs_from_event_table(self, _item: QTableWidgetItem | None) -> None:
         if getattr(self, "_sync_from_table_lock", False):
             return
         events = self._collect_episode_events()
@@ -527,11 +564,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.render_plot(res.get("plot", {}))
             self.tabs.setCurrentWidget(self.results_tab)
         except Exception as exc:
-            QMessageBox.warning(self, "Modellillesztés hiba", str(exc))
+            traceback.print_exc()
+            message = str(exc).strip() or "Váratlan hiba történt a modellillesztés közben."
+            QMessageBox.warning(self, "Modellillesztés hiba", message)
 
     def _on_manual_model_override_changed(self) -> None:
-        if not self._last_pk_payload:
-            return
         if self.antibiotic_combo.currentText() != "Vancomycin":
             return
         self._run_model_selection_only()
@@ -580,6 +617,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self._append_episode_event("maintenance_dose")
             self._append_episode_event("sample")
             self._append_episode_event("sample")
+            self._sync_input_panel_to_episode_events()
         self._reset_non_vancomycin_views() if self.antibiotic_combo.currentText() != "Vancomycin" else None
 
     def collect_pk_inputs(self) -> dict:
@@ -591,6 +629,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return events
         for row in range(self.episode_events_table.rowCount()):
             def txt(col: int) -> str:
+                if col == 1:
+                    widget = self.episode_events_table.cellWidget(row, 1)
+                    if isinstance(widget, QComboBox):
+                        return str(widget.currentData() or widget.currentText()).strip()
                 item = self.episode_events_table.item(row, col)
                 return item.text().strip() if item else ""
 
@@ -627,59 +669,69 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def _sync_input_panel_to_episode_events(self) -> None:
         if not hasattr(self, "episode_events_table"):
             return
-        if self.episode_events_table.rowCount() == 0:
-            self._append_episode_event("maintenance_dose")
-            self._append_episode_event("sample")
-            self._append_episode_event("sample")
-        # Maintain at least one maintenance dose row.
-        self.episode_events_table.setItem(0, 1, QTableWidgetItem("maintenance dose"))
-        self.episode_events_table.setItem(0, 2, QTableWidgetItem(self.dose_edit.text().strip()))
-        self.episode_events_table.setItem(0, 3, QTableWidgetItem(self.tinf_edit.text().strip()))
-        # First two sample rows.
-        sample_rows = []
-        for r in range(self.episode_events_table.rowCount()):
-            kind = (self.episode_events_table.item(r, 1).text().strip().lower() if self.episode_events_table.item(r, 1) else "")
-            if "sample" in kind:
-                sample_rows.append(r)
-        while len(sample_rows) < 2:
-            self._append_episode_event("sample")
-            sample_rows.append(self.episode_events_table.rowCount() - 1)
-        self.episode_events_table.setItem(sample_rows[0], 0, QTableWidgetItem(self.t1_edit.text().strip()))
-        self.episode_events_table.setItem(sample_rows[0], 4, QTableWidgetItem(self.level1_rel_edit.text().strip()))
-        self.episode_events_table.setItem(sample_rows[1], 0, QTableWidgetItem(self.t2_edit.text().strip()))
-        self.episode_events_table.setItem(sample_rows[1], 4, QTableWidgetItem(self.level2_rel_edit.text().strip()))
-        # Loading dose row (optional)
-        loading_value = self.loading_dose_edit.text().strip() if hasattr(self, "loading_dose_edit") else ""
-        if loading_value:
-            loading_time = self.loading_time_edit.text().strip() if hasattr(self, "loading_time_edit") else "-12"
+        if getattr(self, "_sync_from_table_lock", False):
+            return
+        self._sync_from_table_lock = True
+        try:
+            if self.episode_events_table.rowCount() == 0:
+                self._append_episode_event("maintenance_dose")
+                self._append_episode_event("sample")
+                self._append_episode_event("sample")
+            # Maintain at least one maintenance dose row.
+            self._set_event_type_widget(0, "maintenance dose")
+            self.episode_events_table.setItem(0, 2, QTableWidgetItem(self.dose_edit.text().strip()))
+            self.episode_events_table.setItem(0, 3, QTableWidgetItem(self.tinf_edit.text().strip()))
+            # First two sample rows.
+            sample_rows = []
             for r in range(self.episode_events_table.rowCount()):
-                cell = self.episode_events_table.item(r, 1)
-                if cell and "loading" in cell.text().strip().lower():
+                widget = self.episode_events_table.cellWidget(r, 1)
+                kind = str(widget.currentData() or widget.currentText()).strip().lower() if isinstance(widget, QComboBox) else ""
+                if "sample" in kind:
+                    sample_rows.append(r)
+            while len(sample_rows) < 2:
+                self._append_episode_event("sample")
+                sample_rows.append(self.episode_events_table.rowCount() - 1)
+            self.episode_events_table.setItem(sample_rows[0], 0, QTableWidgetItem(self.t1_edit.text().strip()))
+            self.episode_events_table.setItem(sample_rows[0], 4, QTableWidgetItem(self.level1_rel_edit.text().strip()))
+            self.episode_events_table.setItem(sample_rows[1], 0, QTableWidgetItem(self.t2_edit.text().strip()))
+            self.episode_events_table.setItem(sample_rows[1], 4, QTableWidgetItem(self.level2_rel_edit.text().strip()))
+            # Loading dose row (optional)
+            loading_value = self.loading_dose_edit.text().strip() if hasattr(self, "loading_dose_edit") else ""
+            if loading_value:
+                loading_time = self.loading_time_edit.text().strip() if hasattr(self, "loading_time_edit") else "-12"
+                for r in range(self.episode_events_table.rowCount()):
+                    widget = self.episode_events_table.cellWidget(r, 1)
+                    kind = str(widget.currentData() or widget.currentText()).strip().lower() if isinstance(widget, QComboBox) else ""
+                    if "loading" in kind:
+                        self.episode_events_table.setItem(r, 0, QTableWidgetItem(loading_time))
+                        self.episode_events_table.setItem(r, 2, QTableWidgetItem(loading_value))
+                        break
+                else:
+                    self._append_episode_event("loading_dose")
+                    r = self.episode_events_table.rowCount() - 1
+                    self._set_event_type_widget(r, "loading dose")
                     self.episode_events_table.setItem(r, 0, QTableWidgetItem(loading_time))
                     self.episode_events_table.setItem(r, 2, QTableWidgetItem(loading_value))
-                    break
-            else:
-                self._append_episode_event("loading_dose")
-                r = self.episode_events_table.rowCount() - 1
-                self.episode_events_table.setItem(r, 1, QTableWidgetItem("loading dose"))
-                self.episode_events_table.setItem(r, 0, QTableWidgetItem(loading_time))
-                self.episode_events_table.setItem(r, 2, QTableWidgetItem(loading_value))
-        # MIC and creatinine rows (upsert).
-        def _upsert_row(label: str, col: int, value: str) -> None:
-            for r in range(self.episode_events_table.rowCount()):
-                cell = self.episode_events_table.item(r, 1)
-                if cell and cell.text().strip().lower() == label:
-                    self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
-                    return
-            self._append_episode_event(label.replace(" ", "_"))
-            r = self.episode_events_table.rowCount() - 1
-            self.episode_events_table.setItem(r, 1, QTableWidgetItem(label))
-            self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
 
-        if self.mic_edit.text().strip():
-            _upsert_row("mic result", 5, self.mic_edit.text().strip())
-        if self.scr_edit.text().strip():
-            _upsert_row("creatinine result", 6, self.scr_edit.text().strip())
+            # MIC and creatinine rows (upsert).
+            def _upsert_row(label: str, col: int, value: str) -> None:
+                for r in range(self.episode_events_table.rowCount()):
+                    widget = self.episode_events_table.cellWidget(r, 1)
+                    kind = str(widget.currentData() or widget.currentText()).strip().lower() if isinstance(widget, QComboBox) else ""
+                    if kind == label:
+                        self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
+                        return
+                self._append_episode_event(label.replace(" ", "_"))
+                r = self.episode_events_table.rowCount() - 1
+                self._set_event_type_widget(r, label)
+                self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
+
+            if self.mic_edit.text().strip():
+                _upsert_row("mic result", 5, self.mic_edit.text().strip())
+            if self.scr_edit.text().strip():
+                _upsert_row("creatinine result", 6, self.scr_edit.text().strip())
+        finally:
+            self._sync_from_table_lock = False
 
     def _sync_legacy_fields_from_episode_events(self, payload: dict) -> None:
         try:
@@ -1101,7 +1153,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 event.get("note", ""),
             ]
             for col, value in enumerate(mapping):
-                self.episode_events_table.setItem(current, col, QTableWidgetItem(str(value)))
+                if col == 1:
+                    self._set_event_type_widget(current, str(value))
+                else:
+                    self.episode_events_table.setItem(current, col, QTableWidgetItem(str(value)))
         self._set_default_sampling_datetimes()
         synced = self._collect_common_with_events()
         self._sync_legacy_fields_from_episode_events(synced)
@@ -1217,12 +1272,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def render_plot(self, spec: dict):
         self._last_plot_spec = spec or {}
-        if spec.get("single_model") and spec.get("model_averaging"):
-            single = spec["single_model"]
-            avg = spec["model_averaging"]
+        single = spec.get("single_model") or {}
+        avg = spec.get("model_averaging") or {}
+        if single:
             fig = go.Figure()
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
-            if show_averaging and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
+            if show_averaging and avg and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
                 for overlay in avg.get("overlays", []):
                     fig.add_trace(
                         go.Scatter(

@@ -7,14 +7,26 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QSplitter,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
 )
 from shiboken6 import isValid
 import plotly.graph_objects as go
@@ -91,9 +103,160 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._history_store = HistoryStore()
         self._history_tab = HistoryTabController(self._history_store)
         super().__init__(current_user=current_user)
+        self._last_pk_payload: dict = {}
         self._configure_history_toolbar_buttons()
+        self._modernize_vancomycin_ui()
         self.setWindowTitle(APP_NAME)
         self.setStatusBar(AppStatusBar(self))
+
+    def _modernize_vancomycin_ui(self) -> None:
+        if hasattr(self, "empirical_mode_combo"):
+            self.empirical_mode_combo.setVisible(False)
+            self.empirical_mode_combo.setEnabled(False)
+        if hasattr(self, "tabs"):
+            for idx in reversed(range(self.tabs.count())):
+                if self.tabs.tabText(idx) == "Empirikus támogatás":
+                    self.tabs.removeTab(idx)
+            if hasattr(self, "plot_tab") and self.tabs.indexOf(self.plot_tab) < 0:
+                self.tabs.insertTab(2, self.plot_tab, "Vizualizáció")
+            desired = ["Bemenet", "Eredmények", "Vizualizáció", "Előző mérések", "Export", "Info és citációk"]
+            for i, name in enumerate(desired):
+                for j in range(self.tabs.count()):
+                    if self.tabs.tabText(j) == name and j != i:
+                        self.tabs.tabBar().moveTab(j, i)
+                        break
+        self._add_fit_button_to_action_bar()
+        self._build_results_blocks()
+        self._build_visualization_tab()
+        self._build_episode_events_panel()
+
+    def _add_fit_button_to_action_bar(self) -> None:
+        if hasattr(self, "model_fit_btn"):
+            return
+        action_bar = self.calc_btn.parentWidget() if hasattr(self, "calc_btn") else None
+        if action_bar is None or action_bar.layout() is None:
+            return
+        self.model_fit_btn = QPushButton("Modellválasztás / Modellillesztés")
+        self.model_fit_btn.clicked.connect(self._run_model_selection_only)
+        layout = action_bar.layout()
+        insert_at = max(0, layout.indexOf(self.calc_btn))
+        layout.insertWidget(insert_at, self.model_fit_btn)
+
+    def _build_episode_events_panel(self) -> None:
+        if hasattr(self, "episode_events_table"):
+            return
+        parent_layout = self.quick_context.parentWidget().layout() if hasattr(self, "quick_context") else None
+        if parent_layout is None:
+            return
+        box = QGroupBox("Aktuális epizód eseménylista")
+        layout = QVBoxLayout(box)
+        btn_row = QHBoxLayout()
+        actions = [
+            ("Loading hozzáadása", "loading_dose"),
+            ("Dózis hozzáadása", "maintenance_dose"),
+            ("Extra dózis hozzáadása", "extra_dose"),
+            ("Gyógyszerszint hozzáadása", "sample"),
+            ("MIC hozzáadása", "mic_result"),
+            ("Kreatinin hozzáadása", "creatinine_result"),
+        ]
+        for title, event_type in actions:
+            btn = QPushButton(title)
+            btn.clicked.connect(lambda _=False, et=event_type: self._append_episode_event(et))
+            btn_row.addWidget(btn)
+        self.delete_event_btn = QPushButton("Kiválasztott esemény törlése")
+        self.delete_event_btn.clicked.connect(self._delete_selected_event)
+        btn_row.addWidget(self.delete_event_btn)
+        layout.addLayout(btn_row)
+        self.episode_events_table = QTableWidget(0, 8)
+        self.episode_events_table.setHorizontalHeaderLabels(
+            ["Időpont", "Esemény típusa", "Dózis (mg)", "Infúziós idő (h)", "Szint (mg/L)", "MIC", "Kreatinin", "Megjegyzés"]
+        )
+        layout.addWidget(self.episode_events_table)
+        parent_layout.addWidget(box, 2)
+
+    def _append_episode_event(self, event_type: str) -> None:
+        row = self.episode_events_table.rowCount()
+        self.episode_events_table.insertRow(row)
+        values = {
+            "loading_dose": ["0.0", "loading dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
+            "maintenance_dose": ["0.0", "maintenance dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
+            "extra_dose": ["0.0", "extra dose", self.dose_edit.text().strip() or "500", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
+            "sample": [self.t1_edit.text().strip() or "2.0", "sample", "", "", self.level1_rel_edit.text().strip() or "20", "", "", ""],
+            "mic_result": ["0.0", "MIC result", "", "", "", self.mic_edit.text().strip() or "1.0", "", ""],
+            "creatinine_result": ["0.0", "creatinine result", "", "", "", "", self.scr_edit.text().strip() or "90", ""],
+        }.get(event_type, ["", event_type, "", "", "", "", "", ""])
+        for col, val in enumerate(values):
+            self.episode_events_table.setItem(row, col, QTableWidgetItem(val))
+
+    def _delete_selected_event(self) -> None:
+        row = self.episode_events_table.currentRow()
+        if row >= 0:
+            self.episode_events_table.removeRow(row)
+
+    def _build_results_blocks(self) -> None:
+        if hasattr(self, "pkpd_table"):
+            return
+        layout = self.results_tab.layout()
+        if layout is None:
+            return
+        self.pkpd_table = QTableWidget(3, 3)
+        self.pkpd_table.setHorizontalHeaderLabels(["AUC24", "AUC/MIC", "Peak"])
+        self.pkpd_table.setVerticalHeaderLabels(["PK/PD", "Kinetika", "Renális"])
+        self.final_decision_browser = QTextBrowser()
+        self.fit_table = QTableWidget(0, 9)
+        self.fit_table.setHorizontalHeaderLabels(["Modell", "RMSE", "MAE", "Combined", "CL", "Vd", "AUC24", "AUC/MIC", "Státusz"])
+        self.recommendation_browser = QTextBrowser()
+        self.history_summary_browser = QTextBrowser()
+        for widget in [self.pkpd_table, self.final_decision_browser, self.fit_table, self.recommendation_browser, self.history_summary_browser]:
+            layout.insertWidget(0, widget)
+
+    def _build_visualization_tab(self) -> None:
+        if hasattr(self, "viz_mode_tabs"):
+            return
+        layout = self.plot_tab.layout()
+        if layout is None:
+            layout = QVBoxLayout(self.plot_tab)
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        top = QHBoxLayout()
+        self.view_combo = QComboBox()
+        self.view_combo.addItems(["Concentration-time", "AUC"])
+        self.toggle_obs = QCheckBox("Observed pontok")
+        self.toggle_obs.setChecked(True)
+        self.toggle_fit = QCheckBox("Modeled / fitted görbe")
+        self.toggle_fit.setChecked(True)
+        self.toggle_projection = QCheckBox("Future projection")
+        self.toggle_dose_events = QCheckBox("Dose events")
+        self.toggle_overlay = QCheckBox("Overlay modellek")
+        self.toggle_overlay.setChecked(True)
+        top.addWidget(self.view_combo)
+        for chk in [self.toggle_obs, self.toggle_fit, self.toggle_projection, self.toggle_dose_events, self.toggle_overlay]:
+            top.addWidget(chk)
+        top.addStretch(1)
+        layout.addLayout(top)
+        self.viz_mode_tabs = QTabWidget()
+        self.viz_single = QTextBrowser()
+        self.viz_averaging = QTextBrowser()
+        self.viz_mode_tabs.addTab(self.viz_single, "Single model")
+        self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
+        layout.addWidget(self.viz_mode_tabs)
+        self.model_avg_table = QTableWidget(0, 6)
+        self.model_avg_table.setHorizontalHeaderLabels(["Modell", "Súly", "RMSE", "MAE", "AUC24", "AUC/MIC"])
+        layout.addWidget(self.model_avg_table)
+
+    def _run_model_selection_only(self) -> None:
+        try:
+            pk = self.collect_pk_inputs()
+            self._last_pk_payload = pk
+            res = self.calc_vancomycin(pk, self.method_combo.currentText())
+            self.results = res
+            self._update_structured_result_views(res.get("pk", {}))
+            self.render_plot(res.get("plot", {}))
+            self.tabs.setCurrentWidget(self.results_tab)
+        except Exception as exc:
+            QMessageBox.warning(self, "Modellillesztés hiba", str(exc))
 
     def _configure_history_toolbar_buttons(self) -> None:
         if hasattr(self, "clear_form_btn"):
@@ -433,19 +596,25 @@ class MainWindow(legacy_ui.TDMMainWindow):
             single = spec["single_model"]
             avg = spec["model_averaging"]
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=single["pred_x"], y=single["pred_y"], mode="lines", name=f"Single: {single['label']}"))
-            fig.add_trace(go.Scatter(x=single["obs_x"], y=single["obs_y"], mode="markers", name="Observed", marker=dict(size=10)))
-            for overlay in avg.get("overlays", []):
-                fig.add_trace(
-                    go.Scatter(
-                        x=overlay["x"],
-                        y=overlay["y"],
-                        mode="lines",
-                        name=f"Avg {overlay['label']} (w={overlay['weight']:.2f})",
-                        line=dict(width=1, dash="dot"),
-                        opacity=0.6,
+            if not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked():
+                for overlay in avg.get("overlays", []):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=overlay["x"],
+                            y=overlay["y"],
+                            mode="lines",
+                            name=f"Avg {overlay['label']} (w={overlay['weight']:.2f})",
+                            line=dict(width=1, dash="dot"),
+                            opacity=0.6,
+                        )
                     )
-                )
+            if not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked():
+                fig.add_trace(go.Scatter(x=single["pred_x"], y=single["pred_y"], mode="lines", name=f"Single: {single['label']}"))
+            if not hasattr(self, "toggle_obs") or self.toggle_obs.isChecked():
+                fig.add_trace(go.Scatter(x=single["obs_x"], y=single["obs_y"], mode="markers", name="Observed", marker=dict(size=10, color="green")))
+            if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and single.get("dose_events"):
+                for event in single.get("dose_events", []):
+                    fig.add_vline(x=float(event.get("time", 0.0)), line_dash="dash", line_color="gray")
             fig.update_layout(
                 title=f"{spec.get('title', 'Vancomycin')} — Single model + Model averaging",
                 xaxis_title="Óra",
@@ -453,7 +622,37 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 template="plotly_white",
                 margin=dict(l=30, r=30, t=50, b=30),
             )
-            self.plot_view.setHtml(pio.to_html(fig, include_plotlyjs="cdn", full_html=False))
+            html = pio.to_html(fig, include_plotlyjs="cdn", full_html=False)
+            self.plot_view.setHtml(html)
+            if hasattr(self, "viz_single"):
+                fit = single.get("fit", {})
+                rmse = fit.get("rmse")
+                mae = fit.get("mae")
+                self.viz_single.setHtml(
+                    f"<h3>{single.get('label','Single model')}</h3><p>RMSE: {rmse if rmse is not None else '-'} | MAE: {mae if mae is not None else '-'}</p>"
+                )
+            if hasattr(self, "viz_averaging"):
+                self.viz_averaging.setHtml(
+                    "<br/>".join(
+                        [f"{overlay['label']}: w={overlay['weight']:.3f}, RMSE={overlay['rmse']:.3f}, MAE={overlay['mae']:.3f}" for overlay in avg.get("overlays", [])]
+                    )
+                    or "Nincs model averaging adat."
+                )
+            if hasattr(self, "model_avg_table"):
+                self.model_avg_table.setRowCount(0)
+                for overlay in avg.get("overlays", []):
+                    row = self.model_avg_table.rowCount()
+                    self.model_avg_table.insertRow(row)
+                    values = [
+                        overlay["label"],
+                        f"{overlay['weight']:.3f}",
+                        f"{overlay['rmse']:.3f}",
+                        f"{overlay['mae']:.3f}",
+                        f"{overlay.get('auc24', '-')}",
+                        f"{overlay.get('auc_mic', '-')}",
+                    ]
+                    for col, value in enumerate(values):
+                        self.model_avg_table.setItem(row, col, QTableWidgetItem(str(value)))
             return
         return super().render_plot(spec)
 
@@ -534,7 +733,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "obs_y": [pk["c1"], pk["c2"]],
         }
 
-        return {
+        ui_result = {
             "drug": "Vancomycin",
             "method": method,
             "status": result["status"],
@@ -547,6 +746,54 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "suggestion": result["suggestion"],
             "plot": plot,
         }
+        self._update_structured_result_views(result)
+        return ui_result
+
+    def _update_structured_result_views(self, pk_result: dict) -> None:
+        if not pk_result:
+            return
+        if hasattr(self, "pkpd_table"):
+            rows = [
+                [f"{pk_result.get('auc24', 0.0):.1f}", f"{pk_result.get('auc_mic', 'n.a.')}", f"{pk_result.get('peak', 0.0):.1f}"],
+                [f"Trough {pk_result.get('trough', 0.0):.1f}", f"CL {pk_result.get('cl_l_h', 0.0):.2f}", f"Vd {pk_result.get('vd_l', 0.0):.2f}"],
+                [f"ke {pk_result.get('ke', 0.0):.3f}", f"Half-life {pk_result.get('half_life', 0.0):.2f}", f"CrCl {pk_result.get('crcl', 0.0):.1f}"],
+            ]
+            for r, row in enumerate(rows):
+                for c, value in enumerate(row):
+                    self.pkpd_table.setItem(r, c, QTableWidgetItem(value))
+        if hasattr(self, "final_decision_browser"):
+            self.final_decision_browser.setHtml(
+                f"<h3>Final decision</h3><p><b>Kiválasztott modell:</b> {pk_result.get('selected_model_key', '-')}</p>"
+                f"<p>{pk_result.get('final_explanation', '-')}</p>"
+            )
+        if hasattr(self, "fit_table"):
+            self.fit_table.setRowCount(0)
+            for item in pk_result.get("fit_summary", []):
+                row = self.fit_table.rowCount()
+                self.fit_table.insertRow(row)
+                values = [
+                    item.get("model_key"),
+                    f"{item.get('rmse', 0.0):.3f}",
+                    f"{item.get('mae', 0.0):.3f}",
+                    f"{item.get('combined_score', 0.0):.3f}",
+                    f"{item.get('cl_l_h', '-')}",
+                    f"{item.get('vd_l', '-')}",
+                    f"{item.get('auc24', '-')}",
+                    f"{item.get('auc_mic', '-')}",
+                    "ok",
+                ]
+                for col, value in enumerate(values):
+                    self.fit_table.setItem(row, col, QTableWidgetItem(str(value)))
+        if hasattr(self, "recommendation_browser"):
+            suggestion = pk_result.get("suggestion", {}).get("best", {})
+            self.recommendation_browser.setHtml(
+                f"<h3>Recommendation</h3><p><b>Expozíció:</b> {pk_result.get('status', '-')}</p>"
+                f"<p><b>Javaslat:</b> {suggestion.get('dose', 0):.0f} mg q{suggestion.get('tau', 0):.0f}h</p>"
+            )
+        if hasattr(self, "history_summary_browser"):
+            summary = pk_result.get("history_summary_by_antibiotic", {})
+            text = "<br/>".join([f"{k}: {v} epizód" for k, v in summary.items()]) if summary else "Nincs korábbi epizód."
+            self.history_summary_browser.setHtml(f"<h3>History summary</h3><p>{text}</p>")
 
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from tdm_platform.pk.vancomycin.domain import AntibioticEpisode, EpisodeEvent, Patient
@@ -85,10 +86,22 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
     )
     dose_number = int(payload.get("dose_number", 3))
     selection = auto_select_model(episode, weights, dose_number=dose_number, has_previous_episode=bool(previous))
+    raw_selected_model = payload.get("selected_model_key")
+    manual_model_key = str(raw_selected_model).strip() if raw_selected_model is not None else None
+    if manual_model_key in {"", "None", "null"}:
+        manual_model_key = None
+    if manual_model_key:
+        selection = replace(
+            selection,
+            recommended_model_key=manual_model_key,
+            rationale=f"{selection.rationale} Manuális felülbírálás történt: {manual_model_key}.",
+        )
 
     prior_bonus = {selection.recommended_model_key: 1.0}
     for idx, model_key in enumerate(selection.alternative_model_keys):
         prior_bonus[model_key] = max(0.3, 0.8 - idx * 0.15)
+    if manual_model_key:
+        prior_bonus[manual_model_key] = 1.2
 
     consistency_bonus = {}
     for row in previous:

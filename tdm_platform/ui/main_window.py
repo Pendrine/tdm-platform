@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import traceback
+import base64
+from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -556,13 +558,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if self.antibiotic_combo.currentText() != "Vancomycin":
                 self._reset_non_vancomycin_views()
                 return
+            abx = self.antibiotic_combo.currentText()
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
             res = self.calc_vancomycin(pk, "Auto")
             self.results = res
+            self.latest_report = res["report"]
+            self.result_text.setPlainText(res["report"])
+            self.card_primary.update_card(res["primary"], f"{abx} – Auto")
+            self.card_secondary.update_card(res["secondary"], res.get("status_sub", ""))
+            self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
+            self.card_status.update_card(res["status"], res.get("status_sub", ""))
             self._update_structured_result_views(res.get("pk", {}))
             self.render_plot(res.get("plot", {}))
-            self.tabs.setCurrentWidget(self.results_tab)
         except Exception as exc:
             traceback.print_exc()
             message = str(exc).strip() or "Váratlan hiba történt a modellillesztés közben."
@@ -782,6 +790,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "neutropenia": self.neutropenia_check.isChecked(),
         }
         self._sync_input_panel_to_episode_events()
+        if payload["height"] > 0:
+            bmi = payload["weight"] / ((payload["height"] / 100.0) ** 2)
+            payload["obesity"] = bool(payload.get("obesity")) or bmi >= 30.0
         payload["patient_name"] = self.patient_edit.text().strip()
         payload["episode_events"] = self._collect_episode_events()
         payload["hsct"] = bool(self.hsct_check.isChecked()) if hasattr(self, "hsct_check") else False
@@ -1304,6 +1315,30 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 margin=dict(l=30, r=30, t=50, b=30),
             )
             html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
+            if isinstance(getattr(self, "viz_plot_view", None), QTextBrowser) and MATPLOTLIB_UI_OK:
+                try:
+                    mfig = plt.figure(figsize=(8, 4), dpi=120)
+                    ax = mfig.add_subplot(111)
+                    if single.get("pred_x") and single.get("pred_y"):
+                        ax.plot(single["pred_x"], single["pred_y"], label=single.get("label", "Model"), linewidth=2.0, color="#2563eb")
+                    if single.get("obs_x") and single.get("obs_y"):
+                        ax.scatter(single["obs_x"], single["obs_y"], label="Observed", color="#16a34a")
+                    ax.set_xlabel("Óra")
+                    ax.set_ylabel("Koncentráció (mg/L)")
+                    ax.set_title(spec.get("title", "Vancomycin"))
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc="best")
+                    buffer = BytesIO()
+                    mfig.tight_layout()
+                    mfig.savefig(buffer, format="png")
+                    plt.close(mfig)
+                    png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                    html = (
+                        f"<h3>{spec.get('title', 'Vancomycin')}</h3>"
+                        f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%; height:auto;'/>"
+                    )
+                except Exception:
+                    pass
             if hasattr(self, "viz_plot_view"):
                 self.viz_plot_view.setHtml(html)
             if hasattr(self, "viz_single"):

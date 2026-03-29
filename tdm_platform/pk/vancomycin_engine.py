@@ -159,7 +159,7 @@ def calculate(inp: VancomycinInputs) -> dict:
     best = workflow["best"]
     auto = workflow["auto_selection"]
     classical_forced = inp.selected_model_key == "trapezoid_classic" or inp.method == "Klasszikus"
-    classical_auto = inp.method == "Auto" and not inp.selected_model_key and auto.trapezoid_eligible and not auto.bayesian_preferred
+    classical_auto = False
     use_classical = classical_forced or classical_auto
     if use_classical:
         cl_used = base["cl_l_h"]

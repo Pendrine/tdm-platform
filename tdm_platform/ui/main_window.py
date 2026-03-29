@@ -168,8 +168,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
             is_empirical_combo = widget is getattr(self, "empirical_mode_combo", None)
             if is_empirical_label or is_empirical_combo:
                 layout.removeWidget(widget)
-                widget.setParent(None)
-                widget.deleteLater()
+                if is_empirical_combo:
+                    widget.setParent(None)
+                    widget.setVisible(False)
+                else:
+                    widget.setParent(None)
+                    widget.deleteLater()
         if hasattr(self, "empirical_mode_combo"):
             try:
                 self.empirical_mode_combo.currentTextChanged.disconnect(self.refresh_context_panels)
@@ -991,14 +995,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def update_user_status_ui(self):
         super().update_user_status_ui()
-        if self.current_user and hasattr(self, "user_status_label"):
+        if self.current_user and hasattr(self, "user_status_label") and self.user_status_label is not None and isValid(self.user_status_label):
             role_txt = self.current_user.get("role", "orvos")
             username = self._display_name_for_user(self.current_user)
             self.user_status_label.setText(f"Bejelentkezve: {username} ({self.current_user.get('email','')}) – {role_txt}")
 
     def refresh_settings_tab(self):
         super().refresh_settings_tab()
-        if self.current_user and hasattr(self, "settings_name_label"):
+        if self.current_user and hasattr(self, "settings_name_label") and self.settings_name_label is not None and isValid(self.settings_name_label):
             self.settings_name_label.setText(self._display_name_for_user(self.current_user))
 
     def refresh_user_admin_tables(self):

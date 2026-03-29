@@ -140,6 +140,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         break
         self._add_fit_button_to_action_bar()
         self._build_results_blocks()
+        self._move_summary_cards_to_results()
+        self._remove_results_plot_panel()
         self._build_visualization_tab()
         self._build_episode_events_panel()
         self._add_relative_reference_field()
@@ -177,6 +179,30 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.quick_context.setParent(None)
             self.quick_context.deleteLater()
             self.quick_context = None
+
+    def _remove_results_plot_panel(self) -> None:
+        if not hasattr(self, "plot_view") or self.plot_view is None:
+            return
+        self.plot_view.setParent(None)
+        self.plot_view.hide()
+        if not hasattr(self, "open_visualization_btn"):
+            self.open_visualization_btn = QPushButton("Megnyitás a Vizualizáció fülön")
+            self.open_visualization_btn.clicked.connect(lambda: self.tabs.setCurrentWidget(self.plot_tab))
+            layout = self.results_tab.layout()
+            if layout is not None:
+                layout.addWidget(self.open_visualization_btn)
+
+    def _move_summary_cards_to_results(self) -> None:
+        if not all(hasattr(self, name) for name in ("card_primary", "card_secondary", "card_regimen", "card_status")):
+            return
+        layout = self.results_tab.layout()
+        if layout is None:
+            return
+        cards_row = QHBoxLayout()
+        for card in (self.card_status, self.card_regimen, self.card_primary, self.card_secondary):
+            card.setParent(None)
+            cards_row.addWidget(card)
+        layout.insertLayout(0, cards_row)
 
     def _add_fit_button_to_action_bar(self) -> None:
         if hasattr(self, "model_fit_btn"):
@@ -381,9 +407,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def on_antibiotic_change(self):
         super().on_antibiotic_change()
         is_vanco = self.antibiotic_combo.currentText() == "Vancomycin"
+        self._set_default_sampling_datetimes()
         if hasattr(self, "model_fit_btn"):
             self.model_fit_btn.setVisible(is_vanco)
         self._reset_non_vancomycin_views() if not is_vanco else None
+
+    def update_sampling_visibility(self):
+        super().update_sampling_visibility()
+        self._set_default_sampling_datetimes()
 
     def _reset_non_vancomycin_views(self) -> None:
         self.results = {}
@@ -440,7 +471,25 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
         return events
 
-    def collect_common(self) -> dict:
+    def _sync_legacy_fields_from_episode_events(self, payload: dict) -> None:
+        try:
+            self.dose_edit.setText(str(payload.get("dose", self.dose_edit.text())))
+            self.tinf_edit.setText(str(payload.get("tinf", self.tinf_edit.text())))
+            self.scr_edit.setText(str(payload.get("scr_umol", self.scr_edit.text())))
+            if payload.get("mic") is not None:
+                self.mic_edit.setText(str(payload.get("mic")))
+            self.t1_edit.setText(str(payload.get("t1", self.t1_edit.text())))
+            self.t2_edit.setText(str(payload.get("t2", self.t2_edit.text())))
+            self.level1_rel_edit.setText(str(payload.get("c1", self.level1_rel_edit.text())))
+            self.level2_rel_edit.setText(str(payload.get("c2", self.level2_rel_edit.text())))
+            if payload.get("t3") is not None:
+                self.t3_edit.setText(str(payload.get("t3")))
+            if payload.get("c3") is not None:
+                self.level3_edit.setText(str(payload.get("c3")))
+        except Exception:
+            return
+
+    def _collect_common_with_events(self) -> dict:
         payload = super().collect_common()
         payload["patient_name"] = self.patient_edit.text().strip()
         payload["episode_events"] = self._collect_episode_events()
@@ -763,7 +812,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             username_item.setText(self._username_for_email(email_item.text()))
 
     def collect_common(self) -> dict:
-        payload = super().collect_common()
+        payload = self._collect_common_with_events()
+        self._sync_legacy_fields_from_episode_events(payload)
         if self.current_user:
             payload["user"] = self._normalize_email(self.current_user.get("email", ""))
         return payload
@@ -802,6 +852,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             ]
             for col, value in enumerate(mapping):
                 self.episode_events_table.setItem(current, col, QTableWidgetItem(str(value)))
+        self._set_default_sampling_datetimes()
+        synced = self._collect_common_with_events()
+        self._sync_legacy_fields_from_episode_events(synced)
 
     def _resolve_selected_history_record_for_update(self) -> dict:
         selected_record_id = str(self.history_table.property("selected_history_record_id") or "").strip()
@@ -944,7 +997,6 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 margin=dict(l=30, r=30, t=50, b=30),
             )
             html = pio.to_html(fig, include_plotlyjs="cdn", full_html=False)
-            self.plot_view.setHtml(html)
             if hasattr(self, "viz_plot_view"):
                 self.viz_plot_view.setHtml(html)
             if hasattr(self, "viz_single"):
@@ -979,7 +1031,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         if hasattr(self, "viz_plot_view"):
             self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
-        return super().render_plot(spec)
+        return
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:
         result = calculate_vancomycin(
@@ -1168,6 +1220,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return tmp.name
         except Exception:
             return None
+
+    def _render_report_pdf_to_path(self, path: str):
+        if not self.latest_report or not self.results:
+            raise ValueError("Nincs menthető riport.")
+        title = f"Klinikai TDM riport – {self.results.get('drug', '—')} / {self.results.get('method', '—')}"
+        render_simple_report_pdf(path, title=title, report_text=self.latest_report)
 
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(

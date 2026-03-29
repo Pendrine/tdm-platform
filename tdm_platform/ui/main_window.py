@@ -474,6 +474,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         layout.addWidget(self.viz_mode_tabs)
         if hasattr(self, "plot_view") and self.plot_view is not None:
             self.viz_plot_view = self.plot_view
+            self.viz_plot_view.setVisible(True)
         else:
             self.viz_plot_view = QTextBrowser()
         self.viz_plot_view.setMinimumHeight(460)
@@ -703,7 +704,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
         payload["episode_events"] = self._collect_episode_events()
         payload["hsct"] = bool(self.hsct_check.isChecked()) if hasattr(self, "hsct_check") else False
         payload["arc"] = bool(self.arc_check.isChecked()) if hasattr(self, "arc_check") else False
-        payload["dose_number"] = payload.get("dose_count") or len([e for e in payload["episode_events"] if "dose" in str(e.get("event_type", "")).lower()]) or 1
+        current_dose_events = len([e for e in payload["episode_events"] if "dose" in str(e.get("event_type", "")).lower()])
+        prior_dose_events = 0
+        patient_id = str(payload.get("patient_id", "")).strip()
+        for row in getattr(self, "history_data", []) or []:
+            if str(row.get("drug", "")).strip().lower() != "vancomycin":
+                continue
+            if patient_id and str(row.get("patient_id", "")).strip() != patient_id:
+                continue
+            prev_events = (row.get("inputs") or {}).get("episode_events") or []
+            prior_dose_events += len([e for e in prev_events if "dose" in str(e.get("event_type", "")).lower()])
+        payload["prior_dose_events"] = prior_dose_events
+        payload["dose_number"] = payload.get("dose_count") or (current_dose_events + prior_dose_events) or 1
         sample_events = []
         dose_events = []
         for event in payload["episode_events"]:
@@ -759,6 +771,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 self.tabs.setCurrentWidget(self.results_tab)
                 return
             pk = self.collect_pk_inputs()
+            self._last_pk_payload = pk
             res = self.calc_vancomycin(pk, "Auto")
             self.results = res
             self.latest_report = res["report"]
@@ -1205,7 +1218,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 template="plotly_white",
                 margin=dict(l=30, r=30, t=50, b=30),
             )
-            html = pio.to_html(fig, include_plotlyjs="cdn", full_html=False)
+            html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
             if hasattr(self, "viz_plot_view"):
                 self.viz_plot_view.setHtml(html)
             if hasattr(self, "viz_single"):
@@ -1401,8 +1414,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
         if hasattr(self, "history_summary_browser"):
             summary = pk_result.get("history_summary_by_antibiotic", {})
+            dose_info = ""
+            if self._last_pk_payload:
+                dose_info = (
+                    f"<br/>Aktuális dózisesemény: {self._last_pk_payload.get('dose_number', 0)} "
+                    f"(ebből előzmény: {self._last_pk_payload.get('prior_dose_events', 0)})"
+                )
             text = "<br/>".join([f"{k}: {v} epizód" for k, v in summary.items()]) if summary else "Nincs korábbi epizód."
-            self.history_summary_browser.setHtml(f"<h3>History summary</h3><p>{text}</p>")
+            self.history_summary_browser.setHtml(f"<h3>History summary</h3><p>{text}{dose_info}</p>")
 
     def _export_plot_to_png(self) -> Optional[str]:
         if not self.results or not MATPLOTLIB_UI_OK:

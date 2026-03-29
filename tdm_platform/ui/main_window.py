@@ -285,18 +285,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         box = QGroupBox("Aktuális epizód eseménylista")
         layout = QVBoxLayout(box)
         btn_row = QHBoxLayout()
-        actions = [
-            ("Loading hozzáadása", "loading_dose"),
-            ("Dózis hozzáadása", "maintenance_dose"),
-            ("Extra dózis hozzáadása", "extra_dose"),
-            ("Gyógyszerszint hozzáadása", "sample"),
-            ("MIC hozzáadása", "mic_result"),
-            ("Kreatinin hozzáadása", "creatinine_result"),
-        ]
-        for title, event_type in actions:
-            btn = QPushButton(title)
-            btn.clicked.connect(lambda _=False, et=event_type: self._append_episode_event(et))
-            btn_row.addWidget(btn)
+        self.refresh_events_btn = QPushButton("Frissítés")
+        self.refresh_events_btn.clicked.connect(self._sync_input_panel_to_episode_events)
+        btn_row.addWidget(self.refresh_events_btn)
+        self.add_event_btn = QPushButton("Sor hozzáadás")
+        self.add_event_btn.clicked.connect(lambda: self._append_episode_event("sample"))
+        btn_row.addWidget(self.add_event_btn)
         self.delete_event_btn = QPushButton("Kiválasztott esemény törlése")
         self.delete_event_btn.clicked.connect(self._delete_selected_event)
         btn_row.addWidget(self.delete_event_btn)
@@ -305,6 +299,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.episode_events_table.setHorizontalHeaderLabels(
             ["Időpont", "Esemény típusa", "Dózis (mg)", "Infúziós idő (h)", "Szint (mg/L)", "MIC", "Kreatinin", "Megjegyzés"]
         )
+        self._sync_from_table_lock = False
+        self.episode_events_table.itemChanged.connect(self._sync_inputs_from_event_table)
         layout.addWidget(self.episode_events_table)
         parent_layout.addWidget(box, 2)
 
@@ -344,6 +340,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             flags_layout.addRow("", self.arc_check)
 
     def _append_episode_event(self, event_type: str) -> None:
+        self._sync_from_table_lock = True
         row = self.episode_events_table.rowCount()
         self.episode_events_table.insertRow(row)
         values = {
@@ -356,11 +353,44 @@ class MainWindow(legacy_ui.TDMMainWindow):
         }.get(event_type, ["", event_type, "", "", "", "", "", ""])
         for col, val in enumerate(values):
             self.episode_events_table.setItem(row, col, QTableWidgetItem(val))
+        self._sync_from_table_lock = False
 
     def _delete_selected_event(self) -> None:
         row = self.episode_events_table.currentRow()
         if row >= 0:
             self.episode_events_table.removeRow(row)
+
+    def _sync_inputs_from_event_table(self, _item: QTableWidgetItem) -> None:
+        if getattr(self, "_sync_from_table_lock", False):
+            return
+        events = self._collect_episode_events()
+        sample_events = []
+        for event in events:
+            kind = str(event.get("event_type", "")).lower()
+            if "sample" in kind:
+                t_h = self._safe_optional_float(event.get("time_h"))
+                c_h = self._safe_optional_float(event.get("level_mg_l"))
+                if t_h is not None and c_h is not None:
+                    sample_events.append((t_h, c_h))
+            elif "dose" in kind and "loading" not in kind:
+                if event.get("dose_mg"):
+                    self.dose_edit.setText(str(event.get("dose_mg")))
+                if event.get("tinf_h"):
+                    self.tinf_edit.setText(str(event.get("tinf_h")))
+            elif "loading" in kind:
+                self.loading_dose_edit.setText(str(event.get("dose_mg", "")))
+                self.loading_time_edit.setText(str(event.get("time_h", "")))
+            elif "mic" in kind:
+                self.mic_edit.setText(str(event.get("mic", "")))
+            elif "creatinine" in kind:
+                self.scr_edit.setText(str(event.get("creatinine", "")))
+        sample_events.sort(key=lambda x: x[0])
+        if len(sample_events) >= 1:
+            self.t1_edit.setText(str(sample_events[0][0]))
+            self.level1_rel_edit.setText(str(sample_events[0][1]))
+        if len(sample_events) >= 2:
+            self.t2_edit.setText(str(sample_events[1][0]))
+            self.level2_rel_edit.setText(str(sample_events[1][1]))
 
     def _build_results_blocks(self) -> None:
         if hasattr(self, "results_splitter"):

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QScrollArea,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -124,6 +125,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def _modernize_vancomycin_ui(self) -> None:
         self._remove_empirical_controls_from_action_bar()
+        self._remove_method_controls_from_action_bar()
         if hasattr(self, "tabs"):
             for idx in reversed(range(self.tabs.count())):
                 if self.tabs.tabText(idx) == "Empirikus támogatás":
@@ -149,6 +151,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._extend_flag_controls()
         self._set_default_sampling_datetimes()
         self._remove_input_context_block()
+        self._bind_input_panel_to_episode_events()
 
     def _remove_empirical_controls_from_action_bar(self) -> None:
         action_bar = self.calc_btn.parentWidget() if hasattr(self, "calc_btn") else None
@@ -171,6 +174,41 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 self.empirical_mode_combo.currentTextChanged.disconnect(self.refresh_context_panels)
             except Exception:
                 pass
+
+    def _remove_method_controls_from_action_bar(self) -> None:
+        action_bar = self.calc_btn.parentWidget() if hasattr(self, "calc_btn") else None
+        if action_bar is None or action_bar.layout() is None:
+            return
+        layout = action_bar.layout()
+        for idx in reversed(range(layout.count())):
+            item = layout.itemAt(idx)
+            widget = item.widget()
+            if widget is None:
+                continue
+            is_method_label = isinstance(widget, QLabel) and widget.text().strip() == "Módszer"
+            is_method_combo = widget is getattr(self, "method_combo", None)
+            if is_method_label or is_method_combo:
+                layout.removeWidget(widget)
+                if is_method_combo:
+                    widget.setParent(None)
+                    widget.setVisible(False)
+                else:
+                    widget.setParent(None)
+                    widget.deleteLater()
+
+    def _bind_input_panel_to_episode_events(self) -> None:
+        for edit in [
+            getattr(self, "dose_edit", None),
+            getattr(self, "tinf_edit", None),
+            getattr(self, "mic_edit", None),
+            getattr(self, "scr_edit", None),
+            getattr(self, "level1_rel_edit", None),
+            getattr(self, "level2_rel_edit", None),
+            getattr(self, "t1_edit", None),
+            getattr(self, "t2_edit", None),
+        ]:
+            if edit is not None and hasattr(edit, "editingFinished"):
+                edit.editingFinished.connect(self._sync_input_panel_to_episode_events)
 
     def _remove_input_context_block(self) -> None:
         if hasattr(self, "quick_context") and self.quick_context is not None:
@@ -369,7 +407,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
         ]:
             right_layout.addWidget(widget)
         right_layout.addStretch(1)
-        self.results_splitter.addWidget(right_box)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right_box)
+        self.results_splitter.addWidget(right_scroll)
         self.results_splitter.setSizes([760, 520])
 
     def _build_visualization_tab(self) -> None:
@@ -423,7 +464,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 return
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
-            res = self.calc_vancomycin(pk, self.method_combo.currentText())
+            res = self.calc_vancomycin(pk, "Auto")
             self.results = res
             self._update_structured_result_views(res.get("pk", {}))
             self.render_plot(res.get("plot", {}))
@@ -510,6 +551,63 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
         return events
 
+    @staticmethod
+    def _safe_optional_float(raw: object) -> float | None:
+        txt = str(raw or "").strip().replace(",", ".")
+        if txt == "":
+            return None
+        try:
+            return float(txt)
+        except ValueError:
+            return None
+
+    def _safe_required_float(self, raw: object, field: str) -> float:
+        value = self._safe_optional_float(raw)
+        if value is None:
+            raise ValueError(f"A(z) {field} mező kötelező és numerikus értéket vár.")
+        return value
+
+    def _sync_input_panel_to_episode_events(self) -> None:
+        if not hasattr(self, "episode_events_table"):
+            return
+        if self.episode_events_table.rowCount() == 0:
+            self._append_episode_event("maintenance_dose")
+            self._append_episode_event("sample")
+            self._append_episode_event("sample")
+        # Maintain at least one maintenance dose row.
+        self.episode_events_table.setItem(0, 1, QTableWidgetItem("maintenance dose"))
+        self.episode_events_table.setItem(0, 2, QTableWidgetItem(self.dose_edit.text().strip()))
+        self.episode_events_table.setItem(0, 3, QTableWidgetItem(self.tinf_edit.text().strip()))
+        # First two sample rows.
+        sample_rows = []
+        for r in range(self.episode_events_table.rowCount()):
+            kind = (self.episode_events_table.item(r, 1).text().strip().lower() if self.episode_events_table.item(r, 1) else "")
+            if "sample" in kind:
+                sample_rows.append(r)
+        while len(sample_rows) < 2:
+            self._append_episode_event("sample")
+            sample_rows.append(self.episode_events_table.rowCount() - 1)
+        self.episode_events_table.setItem(sample_rows[0], 0, QTableWidgetItem(self.t1_edit.text().strip()))
+        self.episode_events_table.setItem(sample_rows[0], 4, QTableWidgetItem(self.level1_rel_edit.text().strip()))
+        self.episode_events_table.setItem(sample_rows[1], 0, QTableWidgetItem(self.t2_edit.text().strip()))
+        self.episode_events_table.setItem(sample_rows[1], 4, QTableWidgetItem(self.level2_rel_edit.text().strip()))
+        # MIC and creatinine rows (upsert).
+        def _upsert_row(label: str, col: int, value: str) -> None:
+            for r in range(self.episode_events_table.rowCount()):
+                cell = self.episode_events_table.item(r, 1)
+                if cell and cell.text().strip().lower() == label:
+                    self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
+                    return
+            self._append_episode_event(label.replace(" ", "_"))
+            r = self.episode_events_table.rowCount() - 1
+            self.episode_events_table.setItem(r, 1, QTableWidgetItem(label))
+            self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
+
+        if self.mic_edit.text().strip():
+            _upsert_row("mic result", 5, self.mic_edit.text().strip())
+        if self.scr_edit.text().strip():
+            _upsert_row("creatinine result", 6, self.scr_edit.text().strip())
+
     def _sync_legacy_fields_from_episode_events(self, payload: dict) -> None:
         try:
             self.dose_edit.setText(str(payload.get("dose", self.dose_edit.text())))
@@ -529,7 +627,33 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
 
     def _collect_common_with_events(self) -> dict:
-        payload = super().collect_common()
+        payload = {
+            "patient_id": self.patient_edit.text().strip(),
+            "decision": self.decision_edit.toPlainText().strip(),
+            "sex": self.sex_combo.currentText(),
+            "age": self._safe_required_float(self.age_edit.text(), "Életkor"),
+            "weight": self._safe_required_float(self.weight_edit.text(), "Testsúly"),
+            "height": self._safe_required_float(self.height_edit.text(), "Magasság"),
+            "scr_umol": self._safe_required_float(self.scr_edit.text(), "Kreatinin"),
+            "mic": self._safe_optional_float(self.mic_edit.text()),
+            "dose": self._safe_required_float(self.dose_edit.text(), "Dózis"),
+            "tau": self._safe_required_float(self.tau_edit.text(), "Intervallum"),
+            "tinf": self._safe_required_float(self.tinf_edit.text(), "Infúziós idő"),
+            "target_auc": self._safe_optional_float(self.target_auc_edit.text()) or 500.0,
+            "rounding": self._safe_optional_float(self.rounding_edit.text()) or 250.0,
+            "c1": self._safe_required_float(self.level1_rel_edit.text(), "1. szint"),
+            "c2": self._safe_required_float(self.level2_rel_edit.text(), "2. szint"),
+            "c3": self._safe_optional_float(self.level3_edit.text()),
+            "t1": self._safe_required_float(self.t1_edit.text(), "T1"),
+            "t2": self._safe_required_float(self.t2_edit.text(), "T2"),
+            "t3": self._safe_optional_float(self.t3_edit.text()),
+            "icu": self.icu_check.isChecked(),
+            "hematology": self.hematology_check.isChecked(),
+            "unstable_renal": self.unstable_renal_check.isChecked(),
+            "obesity": self.obesity_check.isChecked(),
+            "neutropenia": self.neutropenia_check.isChecked(),
+        }
+        self._sync_input_panel_to_episode_events()
         payload["patient_name"] = self.patient_edit.text().strip()
         payload["episode_events"] = self._collect_episode_events()
         payload["hsct"] = bool(self.hsct_check.isChecked()) if hasattr(self, "hsct_check") else False
@@ -585,17 +709,16 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def calculate(self):
         try:
             abx = self.antibiotic_combo.currentText()
-            method = self.method_combo.currentText()
             if abx != "Vancomycin":
                 self._reset_non_vancomycin_views()
                 self.tabs.setCurrentWidget(self.results_tab)
                 return
             pk = self.collect_pk_inputs()
-            res = self.calc_vancomycin(pk, method)
+            res = self.calc_vancomycin(pk, "Auto")
             self.results = res
             self.latest_report = res["report"]
             self.result_text.setPlainText(res["report"])
-            self.card_primary.update_card(res["primary"], f"{abx} – {method}")
+            self.card_primary.update_card(res["primary"], f"{abx} – Auto")
             self.card_secondary.update_card(res["secondary"], res.get("status_sub", ""))
             self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
             self.card_status.update_card(res["status"], res.get("status_sub", ""))

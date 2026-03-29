@@ -70,7 +70,7 @@ def build_simple_episode(payload: dict) -> AntibioticEpisode:
                     timestamp=now + timedelta(hours=t_from_start),
                     value=value,
                     unit=unit,
-                    payload={"t_from_last_start_h": t_from_start, "tinf_h": float(raw.get("tinf_h", payload.get("tinf_h", 1.0)))},
+                    payload={"t_from_last_start_h": t_from_start, "tinf_h": _to_float(raw.get("tinf_h", payload.get("tinf_h", 1.0)), 1.0)},
                 )
             )
     else:

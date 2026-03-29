@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from tdm_platform.pk.common import UMOL_PER_MGDL_CREATININE, cockcroft_gault, posterior_blend, predict_one_compartment, validate_two_point_levels
+from tdm_platform.pk.vancomycin.workflow import run_vancomycin_workflow
 
 TARGET_AUC_LOW = 400.0
 TARGET_AUC_HIGH = 600.0
@@ -29,8 +30,20 @@ class VancomycinInputs:
     icu: bool = False
     obesity: bool = False
     unstable_renal: bool = False
+    hematology: bool = False
+    hsct: bool = False
+    hemodialysis: bool = False
+    dose_number: int = 3
+    height_cm: float = 170.0
+    patient_id: str = ""
+    patient_name: str = ""
     rounding_mg: float = 250.0
     method: str = "Klasszikus"
+    selected_model_key: str | None = None
+    rass_score: float | None = None
+    saspi_score: float | None = None
+    history_rows: list[dict] | None = None
+    episode_events: list[dict] | None = None
 
 
 def calc_auc_trapezoid(inp: VancomycinInputs) -> dict[str, float]:
@@ -110,44 +123,103 @@ def calculate(inp: VancomycinInputs) -> dict:
         raise ValueError("Vancomycinnél a 2. minta a következő dózis előtt legyen (T2 < τ).")
 
     base = calc_auc_trapezoid(inp)
-    scr_mg_dl = inp.scr_umol / UMOL_PER_MGDL_CREATININE
-    crcl = cockcroft_gault(inp.age, inp.sex, inp.weight_kg, scr_mg_dl)
-    cl_used = base["cl_l_h"]
-    vd_used = base["vd_l"]
-    pred_peak = base["true_peak"]
-    pred_trough = base["true_trough"]
-    pred_auc24 = base["auc24"]
-    pred_ke = base["ke"]
-    pred_half_life = base["half_life"]
-
-    if inp.method != "Klasszikus":
-        vd_prior = inp.weight_kg * (0.7 if inp.method == "Bayesian" else 0.9)
-        if inp.obesity:
-            vd_prior *= 1.15
-        if inp.icu:
-            vd_prior *= 1.10
-        if inp.unstable_renal:
-            vd_prior *= 1.08
-        ke_obs = math.log(inp.c1 / inp.c2) / (inp.t2_start_h - inp.t1_start_h)
-        cl_prior = max(1.0, crcl * 0.06)
-        cl_obs = max(0.5, ke_obs * vd_prior)
-        obs_weight = 0.65 if inp.method == "Bayesian" else 0.50
-        cl_used = posterior_blend(cl_prior, cl_obs, obs_weight)
-        vd_used = posterior_blend(vd_prior, cl_obs / ke_obs, 0.40)
-        pred = predict_one_compartment(inp.dose_mg, inp.tau_h, inp.tinf_h, cl_used, vd_used)
-        pred_peak = pred.peak
-        pred_trough = pred.trough
-        pred_auc24 = pred.auc24
-        pred_ke = pred.ke
-        pred_half_life = pred.half_life
+    workflow = run_vancomycin_workflow(
+        {
+            "patient_id": inp.patient_id,
+            "patient_name": inp.patient_name,
+            "sex": inp.sex,
+            "age": inp.age,
+            "height_cm": inp.height_cm,
+            "weight_kg": inp.weight_kg,
+            "scr_umol": inp.scr_umol,
+            "dose_mg": inp.dose_mg,
+            "tau_h": inp.tau_h,
+            "tinf_h": inp.tinf_h,
+            "c1": inp.c1,
+            "t1_h": inp.t1_start_h,
+            "c2": inp.c2,
+            "t2_h": inp.t2_start_h,
+            "target_auc": inp.target_auc,
+            "mic": inp.mic,
+            "icu": inp.icu,
+            "obesity": inp.obesity,
+            "unstable_renal": inp.unstable_renal,
+            "hematology": inp.hematology,
+            "hsct": inp.hsct,
+            "hemodialysis": inp.hemodialysis,
+            "dose_number": inp.dose_number,
+            "rass_score": inp.rass_score,
+            "saspi_score": inp.saspi_score,
+            "method": inp.method,
+            "selected_model_key": inp.selected_model_key,
+            "episode_events": inp.episode_events or [],
+        },
+        history_rows=inp.history_rows or [],
+    )
+    best = workflow["best"]
+    auto = workflow["auto_selection"]
+    classical_forced = inp.selected_model_key == "trapezoid_classic" or inp.method == "Klasszikus"
+    classical_auto = False
+    use_classical = classical_forced or classical_auto
+    if use_classical:
+        cl_used = base["cl_l_h"]
+        vd_used = base["vd_l"]
+        pred_peak = base["true_peak"]
+        pred_trough = base["true_trough"]
+        pred_auc24 = base["auc24"]
+        pred_ke = base["ke"]
+        pred_half_life = base["half_life"]
+        selected_model_key = "trapezoid_classic"
+        final_explanation = "Klasszikus trapezoid (steady-state) számítás kényszerítve; a végső PK értékek ezt a modellt követik."
+    else:
+        cl_used = best.cl_l_h
+        vd_used = best.vd_l
+        pred_peak = max(best.predicted_concentrations)
+        pred_trough = min(best.predicted_concentrations)
+        pred_auc24 = best.auc24
+        pred_ke = cl_used / vd_used
+        pred_half_life = math.log(2) / pred_ke
+        selected_model_key = workflow["final"].selected_model_key
+        final_explanation = workflow["final"].explanation
+    crcl = workflow["crcl"]
+    auto_selection = {
+        "recommended_model_key": auto.recommended_model_key,
+        "alternative_model_keys": list(auto.alternative_model_keys),
+        "rationale": auto.rationale,
+        "bayesian_preferred": auto.bayesian_preferred,
+        "trapezoid_eligible": auto.trapezoid_eligible,
+    }
+    fit_summary = [
+        {
+            "model_key": fit.model_key,
+            "rmse": fit.rmse,
+            "mae": fit.mae,
+            "combined_score": fit.combined_score,
+            "cl_l_h": fit.cl_l_h,
+            "vd_l": fit.vd_l,
+            "auc24": fit.auc24,
+            "auc_mic": fit.auc_mic,
+        }
+        for fit in workflow["final"].ranking
+    ]
+    history_summary_by_antibiotic = workflow.get("history_summary_by_antibiotic", {})
+    missing_covariates = workflow.get("missing_covariates", {})
 
     status = "Célzónában"
     if pred_auc24 < TARGET_AUC_LOW:
         status = "Alulexpozíció"
     elif pred_auc24 > TARGET_AUC_HIGH:
         status = "Túlexpozíció"
+
     auc_mic = None if inp.mic is None else pred_auc24 / inp.mic
     suggestion = suggest_regimen(cl_used, vd_used, inp.target_auc, crcl, inp.rounding_mg)
+
+    vd_prior = inp.weight_kg * (0.7 if inp.method == "Bayesian" else 0.9)
+    ke_obs = math.log(inp.c1 / inp.c2) / (inp.t2_start_h - inp.t1_start_h)
+    cl_prior = max(1.0, crcl * 0.06)
+    cl_obs = max(0.5, ke_obs * vd_prior)
+    _ = posterior_blend(cl_prior, cl_obs, 0.6)
+
     return {
         "status": status,
         "crcl": crcl,
@@ -160,4 +232,12 @@ def calculate(inp: VancomycinInputs) -> dict:
         "ke": pred_ke,
         "auc_mic": auc_mic,
         "suggestion": suggestion,
+        "selected_model_key": selected_model_key,
+        "auto_selection": auto_selection,
+        "fit_summary": fit_summary,
+        "final_explanation": final_explanation,
+        "history_summary_by_antibiotic": history_summary_by_antibiotic,
+        "missing_covariates": missing_covariates,
+        "plot": workflow.get("plot"),
+        "classical_reference": base,
     }

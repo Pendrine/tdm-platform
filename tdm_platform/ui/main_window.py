@@ -367,12 +367,24 @@ class MainWindow(legacy_ui.TDMMainWindow):
         flags_layout = self.icu_check.parentWidget().layout() if hasattr(self, "icu_check") else None
         if not isinstance(flags_layout, QFormLayout):
             return
+        if hasattr(self, "obesity_check") and self.obesity_check is not None:
+            # Obesity flag is auto-derived from BMI to avoid duplicate/manual mismatch.
+            self.obesity_check.setChecked(False)
+            self.obesity_check.hide()
         if not hasattr(self, "hsct_check"):
             self.hsct_check = QCheckBox("HSCT")
             flags_layout.addRow("", self.hsct_check)
         if not hasattr(self, "arc_check"):
             self.arc_check = QCheckBox("ARC / augmented renal clearance")
             flags_layout.addRow("", self.arc_check)
+
+    def _computed_obesity_flag(self) -> bool:
+        weight = self._safe_optional_float(self.weight_edit.text()) if hasattr(self, "weight_edit") else None
+        height = self._safe_optional_float(self.height_edit.text()) if hasattr(self, "height_edit") else None
+        if weight is None or height is None or height <= 0:
+            return False
+        bmi = weight / ((height / 100.0) ** 2)
+        return bmi >= 30.0
 
     def _append_episode_event(self, event_type: str) -> None:
         previous_lock = getattr(self, "_sync_from_table_lock", False)
@@ -786,13 +798,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "icu": self.icu_check.isChecked(),
             "hematology": self.hematology_check.isChecked(),
             "unstable_renal": self.unstable_renal_check.isChecked(),
-            "obesity": self.obesity_check.isChecked(),
+            "obesity": self._computed_obesity_flag(),
             "neutropenia": self.neutropenia_check.isChecked(),
         }
         self._sync_input_panel_to_episode_events()
         if payload["height"] > 0:
             bmi = payload["weight"] / ((payload["height"] / 100.0) ** 2)
-            payload["obesity"] = bool(payload.get("obesity")) or bmi >= 30.0
+            payload["obesity"] = bmi >= 30.0
         payload["patient_name"] = self.patient_edit.text().strip()
         payload["episode_events"] = self._collect_episode_events()
         payload["hsct"] = bool(self.hsct_check.isChecked()) if hasattr(self, "hsct_check") else False
@@ -1205,7 +1217,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "icu": self.icu_check.isChecked(),
             "hematology": self.hematology_check.isChecked(),
             "unstable_renal": self.unstable_renal_check.isChecked(),
-            "obesity": self.obesity_check.isChecked(),
+            "obesity": self._computed_obesity_flag(),
             "neutropenia": self.neutropenia_check.isChecked(),
         }
 

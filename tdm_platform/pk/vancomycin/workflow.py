@@ -17,6 +17,12 @@ from tdm_platform.pk.vancomycin.weights import build_weight_metrics, crcl_from_m
 
 def build_simple_episode(payload: dict) -> AntibioticEpisode:
     now = datetime.utcnow()
+    def _to_float(value: object, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     patient = Patient(
         patient_id=str(payload.get("patient_id", "")).strip(),
         patient_name=str(payload.get("patient_name", "")).strip(),
@@ -33,38 +39,71 @@ def build_simple_episode(payload: dict) -> AntibioticEpisode:
         rass_score=payload.get("rass_score"),
         saspi_score=payload.get("saspi_score"),
     )
-    events = (
-        EpisodeEvent(
-            event_type="maintenance_dose",
-            timestamp=now,
-            value=float(payload["dose_mg"]),
-            unit="mg",
-            payload={"tau_h": float(payload["tau_h"]), "tinf_h": float(payload["tinf_h"]), "t_from_last_start_h": 0.0},
-        ),
-        EpisodeEvent(
-            event_type="sample",
-            timestamp=now + timedelta(hours=float(payload["t1_h"])),
-            value=float(payload["c1"]),
-            unit="mg/L",
-            payload={"t_from_last_start_h": float(payload["t1_h"])},
-        ),
-        EpisodeEvent(
-            event_type="sample",
-            timestamp=now + timedelta(hours=float(payload["t2_h"])),
-            value=float(payload["c2"]),
-            unit="mg/L",
-            payload={"t_from_last_start_h": float(payload["t2_h"])},
-        ),
-    )
-    if payload.get("mic") is not None:
-        events += (
-            EpisodeEvent(event_type="mic_result", timestamp=now, value=float(payload["mic"]), unit="mg/L"),
-        )
+    events = []
+    raw_events = list(payload.get("episode_events") or [])
+    if raw_events:
+        for raw in raw_events:
+            event_type = str(raw.get("event_type", "")).strip().lower().replace(" ", "_")
+            try:
+                t_from_start = float(raw.get("time_h", 0.0))
+            except (TypeError, ValueError):
+                t_from_start = 0.0
+            dose_val = raw.get("dose_mg")
+            level_val = raw.get("level_mg_l")
+            value = 0.0
+            unit = "mg"
+            if "sample" in event_type:
+                value = _to_float(level_val, 0.0)
+                unit = "mg/L"
+            elif "mic" in event_type:
+                value = _to_float(raw.get("mic"), 0.0)
+                unit = "mg/L"
+            elif "creatinine" in event_type:
+                value = _to_float(raw.get("creatinine"), 0.0)
+                unit = "µmol/L"
+            else:
+                value = _to_float(dose_val, 0.0)
+                unit = "mg"
+            events.append(
+                EpisodeEvent(
+                    event_type=event_type,
+                    timestamp=now + timedelta(hours=t_from_start),
+                    value=value,
+                    unit=unit,
+                    payload={"t_from_last_start_h": t_from_start, "tinf_h": float(raw.get("tinf_h", payload.get("tinf_h", 1.0)))},
+                )
+            )
+    else:
+        events = [
+            EpisodeEvent(
+                event_type="maintenance_dose",
+                timestamp=now,
+                value=float(payload["dose_mg"]),
+                unit="mg",
+                payload={"tau_h": float(payload["tau_h"]), "tinf_h": float(payload["tinf_h"]), "t_from_last_start_h": 0.0},
+            ),
+            EpisodeEvent(
+                event_type="sample",
+                timestamp=now + timedelta(hours=float(payload["t1_h"])),
+                value=float(payload["c1"]),
+                unit="mg/L",
+                payload={"t_from_last_start_h": float(payload["t1_h"])},
+            ),
+            EpisodeEvent(
+                event_type="sample",
+                timestamp=now + timedelta(hours=float(payload["t2_h"])),
+                value=float(payload["c2"]),
+                unit="mg/L",
+                payload={"t_from_last_start_h": float(payload["t2_h"])},
+            ),
+        ]
+    if payload.get("mic") is not None and not any(e.event_type == "mic_result" for e in events):
+        events.append(EpisodeEvent(event_type="mic_result", timestamp=now, value=float(payload["mic"]), unit="mg/L"))
     return AntibioticEpisode(
         episode_id=str(payload.get("episode_id", "ep-current")),
         antibiotic="Vancomycin",
         patient=patient,
-        events=events,
+        events=tuple(events),
     )
 
 

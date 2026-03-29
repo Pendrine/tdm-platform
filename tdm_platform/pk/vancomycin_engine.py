@@ -43,6 +43,7 @@ class VancomycinInputs:
     rass_score: float | None = None
     saspi_score: float | None = None
     history_rows: list[dict] | None = None
+    episode_events: list[dict] | None = None
 
 
 def calc_auc_trapezoid(inp: VancomycinInputs) -> dict[str, float]:
@@ -151,6 +152,7 @@ def calculate(inp: VancomycinInputs) -> dict:
             "saspi_score": inp.saspi_score,
             "method": inp.method,
             "selected_model_key": inp.selected_model_key,
+            "episode_events": inp.episode_events or [],
         },
         history_rows=inp.history_rows or [],
     )

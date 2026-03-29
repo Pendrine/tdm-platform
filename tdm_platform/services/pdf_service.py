@@ -6,6 +6,8 @@ try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
 
     REPORTLAB_OK = True
 except Exception:
@@ -38,15 +40,28 @@ def render_simple_report_pdf(path: str | Path, title: str, report_text: str) -> 
     margin = 15 * mm
     y = page_height - margin
     canvas.setTitle(title)
-    canvas.setFont("Helvetica-Bold", 16)
+    font_regular = "Helvetica"
+    font_bold = "Helvetica-Bold"
+    for candidate in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+    ):
+        try:
+            pdfmetrics.registerFont(TTFont("DejaVuSans", candidate))
+            font_regular = "DejaVuSans"
+            font_bold = "DejaVuSans"
+            break
+        except Exception:
+            continue
+    canvas.setFont(font_bold, 16)
     canvas.drawString(margin, y, title[:120])
     y -= 10 * mm
-    canvas.setFont("Helvetica", 10)
+    canvas.setFont(font_regular, 10)
     for line in _wrap_text(report_text):
         if y < margin:
             canvas.showPage()
             y = page_height - margin
-            canvas.setFont("Helvetica", 10)
+            canvas.setFont(font_regular, 10)
         canvas.drawString(margin, y, line)
         y -= 4.8 * mm
     canvas.save()

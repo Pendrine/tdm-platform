@@ -5,11 +5,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import QDate, QDateTime, QTime
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDateTimeEdit,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -31,6 +33,15 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 import plotly.graph_objects as go
 import plotly.io as pio
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    MATPLOTLIB_UI_OK = True
+except Exception:
+    MATPLOTLIB_UI_OK = False
 
 from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
@@ -40,6 +51,7 @@ from tdm_platform.core.permissions import is_primary_moderator
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as calculate_vancomycin
+from tdm_platform.pk.vancomycin.model_library import MODELS
 from tdm_platform.services.pdf_service import render_simple_report_pdf
 from tdm_platform.services.smtp_service import SMTPSettingsStore, get_smtp_settings
 from tdm_platform.storage.paths import (
@@ -110,16 +122,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.setStatusBar(AppStatusBar(self))
 
     def _modernize_vancomycin_ui(self) -> None:
-        if hasattr(self, "empirical_mode_combo"):
-            self.empirical_mode_combo.setVisible(False)
-            self.empirical_mode_combo.setEnabled(False)
+        self._remove_empirical_controls_from_action_bar()
         if hasattr(self, "tabs"):
             for idx in reversed(range(self.tabs.count())):
                 if self.tabs.tabText(idx) == "Empirikus támogatás":
                     self.tabs.removeTab(idx)
             if hasattr(self, "plot_tab") and self.tabs.indexOf(self.plot_tab) < 0:
                 self.tabs.insertTab(2, self.plot_tab, "Vizualizáció")
-            desired = ["Bemenet", "Eredmények", "Vizualizáció", "Előző mérések", "Export", "Info és citációk"]
+            for idx in range(self.tabs.count()):
+                if self.tabs.tabText(idx) == "Előző mérések":
+                    self.tabs.setTabText(idx, "Előző események")
+            desired = ["Bemenet", "Eredmények", "Vizualizáció", "Előző események", "Export", "Info és citációk"]
             for i, name in enumerate(desired):
                 for j in range(self.tabs.count()):
                     if self.tabs.tabText(j) == name and j != i:
@@ -129,6 +142,41 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._build_results_blocks()
         self._build_visualization_tab()
         self._build_episode_events_panel()
+        self._add_relative_reference_field()
+        self._extend_flag_controls()
+        self._set_default_sampling_datetimes()
+        self._remove_input_context_block()
+
+    def _remove_empirical_controls_from_action_bar(self) -> None:
+        action_bar = self.calc_btn.parentWidget() if hasattr(self, "calc_btn") else None
+        if action_bar is None or action_bar.layout() is None:
+            return
+        layout = action_bar.layout()
+        for idx in reversed(range(layout.count())):
+            item = layout.itemAt(idx)
+            widget = item.widget()
+            if widget is None:
+                continue
+            is_empirical_label = isinstance(widget, QLabel) and "Empirikus stratégia" in widget.text()
+            is_empirical_combo = widget is getattr(self, "empirical_mode_combo", None)
+            if is_empirical_label or is_empirical_combo:
+                layout.removeWidget(widget)
+                widget.setParent(None)
+                widget.deleteLater()
+        if hasattr(self, "empirical_mode_combo"):
+            try:
+                self.empirical_mode_combo.currentTextChanged.disconnect(self.refresh_context_panels)
+            except Exception:
+                pass
+
+    def _remove_input_context_block(self) -> None:
+        if hasattr(self, "quick_context") and self.quick_context is not None:
+            parent_layout = self.quick_context.parentWidget().layout()
+            if parent_layout is not None:
+                parent_layout.removeWidget(self.quick_context)
+            self.quick_context.setParent(None)
+            self.quick_context.deleteLater()
+            self.quick_context = None
 
     def _add_fit_button_to_action_bar(self) -> None:
         if hasattr(self, "model_fit_btn"):
@@ -145,7 +193,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def _build_episode_events_panel(self) -> None:
         if hasattr(self, "episode_events_table"):
             return
-        parent_layout = self.quick_context.parentWidget().layout() if hasattr(self, "quick_context") else None
+        parent_widget = None
+        if hasattr(self, "quick_context") and self.quick_context is not None:
+            parent_widget = self.quick_context.parentWidget()
+        elif hasattr(self, "card_primary"):
+            parent_widget = self.card_primary.parentWidget()
+        parent_layout = parent_widget.layout() if parent_widget is not None else None
         if parent_layout is None:
             return
         box = QGroupBox("Aktuális epizód eseménylista")
@@ -173,6 +226,41 @@ class MainWindow(legacy_ui.TDMMainWindow):
         )
         layout.addWidget(self.episode_events_table)
         parent_layout.addWidget(box, 2)
+
+    def _add_relative_reference_field(self) -> None:
+        if hasattr(self, "relative_reference_dt"):
+            return
+        rel_layout = self.relative_box.layout() if hasattr(self, "relative_box") else None
+        if not isinstance(rel_layout, QFormLayout):
+            return
+        self.relative_reference_dt = QDateTimeEdit()
+        self.relative_reference_dt.setCalendarPopup(True)
+        rel_layout.insertRow(0, "Utolsó dózis kezdete (t0)", self.relative_reference_dt)
+
+    def _set_default_sampling_datetimes(self) -> None:
+        today = QDate.currentDate()
+        start = QDateTime(today, QTime(8, 0))
+        s1 = QDateTime(today, QTime(10, 0))
+        s2 = QDateTime(today, QTime(19, 0))
+        if hasattr(self, "last_infusion_dt"):
+            self.last_infusion_dt.setDateTime(start)
+        if hasattr(self, "sample1_dt"):
+            self.sample1_dt.setDateTime(s1)
+        if hasattr(self, "sample2_dt"):
+            self.sample2_dt.setDateTime(s2)
+        if hasattr(self, "relative_reference_dt"):
+            self.relative_reference_dt.setDateTime(start)
+
+    def _extend_flag_controls(self) -> None:
+        flags_layout = self.icu_check.parentWidget().layout() if hasattr(self, "icu_check") else None
+        if not isinstance(flags_layout, QFormLayout):
+            return
+        if not hasattr(self, "hsct_check"):
+            self.hsct_check = QCheckBox("HSCT")
+            flags_layout.addRow("", self.hsct_check)
+        if not hasattr(self, "arc_check"):
+            self.arc_check = QCheckBox("ARC / augmented renal clearance")
+            flags_layout.addRow("", self.arc_check)
 
     def _append_episode_event(self, event_type: str) -> None:
         row = self.episode_events_table.rowCount()
@@ -202,12 +290,26 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.pkpd_table = QTableWidget(3, 3)
         self.pkpd_table.setHorizontalHeaderLabels(["AUC24", "AUC/MIC", "Peak"])
         self.pkpd_table.setVerticalHeaderLabels(["PK/PD", "Kinetika", "Renális"])
+        self.auto_select_browser = QTextBrowser()
+        self.model_override_combo = QComboBox()
+        self.model_override_combo.addItem("Automatikus javaslat", "")
+        for model in MODELS:
+            self.model_override_combo.addItem(model.label, model.key)
+        self.model_override_combo.currentIndexChanged.connect(self._on_manual_model_override_changed)
         self.final_decision_browser = QTextBrowser()
         self.fit_table = QTableWidget(0, 9)
         self.fit_table.setHorizontalHeaderLabels(["Modell", "RMSE", "MAE", "Combined", "CL", "Vd", "AUC24", "AUC/MIC", "Státusz"])
         self.recommendation_browser = QTextBrowser()
         self.history_summary_browser = QTextBrowser()
-        for widget in [self.pkpd_table, self.final_decision_browser, self.fit_table, self.recommendation_browser, self.history_summary_browser]:
+        for widget in [
+            self.pkpd_table,
+            self.auto_select_browser,
+            self.model_override_combo,
+            self.final_decision_browser,
+            self.fit_table,
+            self.recommendation_browser,
+            self.history_summary_browser,
+        ]:
             layout.insertWidget(0, widget)
 
     def _build_visualization_tab(self) -> None:
@@ -242,12 +344,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.viz_mode_tabs.addTab(self.viz_single, "Single model")
         self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
         layout.addWidget(self.viz_mode_tabs)
+        self.viz_plot_view = QTextBrowser()
+        self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
+        layout.addWidget(self.viz_plot_view, 1)
         self.model_avg_table = QTableWidget(0, 6)
         self.model_avg_table.setHorizontalHeaderLabels(["Modell", "Súly", "RMSE", "MAE", "AUC24", "AUC/MIC"])
         layout.addWidget(self.model_avg_table)
 
     def _run_model_selection_only(self) -> None:
         try:
+            if self.antibiotic_combo.currentText() != "Vancomycin":
+                self._reset_non_vancomycin_views()
+                return
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
             res = self.calc_vancomycin(pk, self.method_combo.currentText())
@@ -257,6 +365,196 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.tabs.setCurrentWidget(self.results_tab)
         except Exception as exc:
             QMessageBox.warning(self, "Modellillesztés hiba", str(exc))
+
+    def _on_manual_model_override_changed(self) -> None:
+        if not self._last_pk_payload:
+            return
+        if self.antibiotic_combo.currentText() != "Vancomycin":
+            return
+        self._run_model_selection_only()
+
+    def methods_for_antibiotic(self, abx: str) -> list[str]:
+        if abx == "Vancomycin":
+            return ["Klasszikus", "Bayesian"]
+        return ["Nincs implementálva"]
+
+    def on_antibiotic_change(self):
+        super().on_antibiotic_change()
+        is_vanco = self.antibiotic_combo.currentText() == "Vancomycin"
+        if hasattr(self, "model_fit_btn"):
+            self.model_fit_btn.setVisible(is_vanco)
+        self._reset_non_vancomycin_views() if not is_vanco else None
+
+    def _reset_non_vancomycin_views(self) -> None:
+        self.results = {}
+        self.latest_report = ""
+        self.result_text.setPlainText("Ehhez az antibiotikumhoz még nincs modell implementálva.")
+        if hasattr(self, "plot_view"):
+            self.plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
+        if hasattr(self, "viz_single"):
+            self.viz_single.setHtml("<p>Még nincs számítási eredmény.</p>")
+        if hasattr(self, "viz_averaging"):
+            self.viz_averaging.setHtml("<p>Még nincs számítási eredmény.</p>")
+        if hasattr(self, "fit_table"):
+            self.fit_table.setRowCount(0)
+        if hasattr(self, "model_avg_table"):
+            self.model_avg_table.setRowCount(0)
+        if hasattr(self, "recommendation_browser"):
+            self.recommendation_browser.setHtml("<p>Nincs recommendation ehhez az antibiotikumhoz.</p>")
+
+    def reset_defaults(self):
+        super().reset_defaults()
+        self._set_default_sampling_datetimes()
+        if hasattr(self, "method_combo") and self.method_combo.findText("Klasszikus") >= 0:
+            self.method_combo.setCurrentText("Klasszikus")
+        if hasattr(self, "episode_events_table"):
+            self.episode_events_table.setRowCount(0)
+            self._append_episode_event("maintenance_dose")
+            self._append_episode_event("sample")
+            self._append_episode_event("sample")
+        self._reset_non_vancomycin_views() if self.antibiotic_combo.currentText() != "Vancomycin" else None
+
+    def collect_pk_inputs(self) -> dict:
+        return self.collect_common()
+
+    def _collect_episode_events(self) -> list[dict]:
+        events: list[dict] = []
+        if not hasattr(self, "episode_events_table"):
+            return events
+        for row in range(self.episode_events_table.rowCount()):
+            def txt(col: int) -> str:
+                item = self.episode_events_table.item(row, col)
+                return item.text().strip() if item else ""
+
+            events.append(
+                {
+                    "time_h": txt(0),
+                    "event_type": txt(1),
+                    "dose_mg": txt(2),
+                    "tinf_h": txt(3),
+                    "level_mg_l": txt(4),
+                    "mic": txt(5),
+                    "creatinine": txt(6),
+                    "note": txt(7),
+                }
+            )
+        return events
+
+    def collect_common(self) -> dict:
+        payload = super().collect_common()
+        payload["patient_name"] = self.patient_edit.text().strip()
+        payload["episode_events"] = self._collect_episode_events()
+        payload["hsct"] = bool(self.hsct_check.isChecked()) if hasattr(self, "hsct_check") else False
+        payload["arc"] = bool(self.arc_check.isChecked()) if hasattr(self, "arc_check") else False
+        payload["dose_number"] = len([e for e in payload["episode_events"] if "dose" in str(e.get("event_type", "")).lower()]) or 1
+        sample_events = []
+        dose_events = []
+        for event in payload["episode_events"]:
+            e_type = str(event.get("event_type", "")).lower()
+            try:
+                t_h = float(str(event.get("time_h", "")).replace(",", "."))
+            except ValueError:
+                continue
+            if "sample" in e_type:
+                try:
+                    c = float(str(event.get("level_mg_l", "")).replace(",", "."))
+                except ValueError:
+                    continue
+                sample_events.append((t_h, c))
+            if "dose" in e_type:
+                dose_events.append(event)
+            if "mic" in e_type:
+                try:
+                    payload["mic"] = float(str(event.get("mic", "")).replace(",", "."))
+                except ValueError:
+                    pass
+            if "creatinine" in e_type:
+                try:
+                    payload["scr_umol"] = float(str(event.get("creatinine", "")).replace(",", "."))
+                except ValueError:
+                    pass
+        sample_events.sort(key=lambda x: x[0])
+        if len(sample_events) >= 2:
+            payload["t1"], payload["c1"] = sample_events[0]
+            payload["t2"], payload["c2"] = sample_events[1]
+            if len(sample_events) >= 3:
+                payload["t3"], payload["c3"] = sample_events[2]
+        if dose_events:
+            last_dose = dose_events[-1]
+            try:
+                payload["dose"] = float(str(last_dose.get("dose_mg", payload["dose"])).replace(",", "."))
+            except ValueError:
+                pass
+            try:
+                payload["tinf"] = float(str(last_dose.get("tinf_h", payload["tinf"])).replace(",", "."))
+            except ValueError:
+                pass
+        if self.sample_mode_combo.currentIndex() == 1 and hasattr(self, "relative_reference_dt"):
+            t0 = self.relative_reference_dt.dateTime().toPython()
+            payload["reference_time"] = t0.isoformat()
+        return payload
+
+    def calculate(self):
+        try:
+            abx = self.antibiotic_combo.currentText()
+            method = self.method_combo.currentText()
+            if abx != "Vancomycin":
+                self._reset_non_vancomycin_views()
+                self.tabs.setCurrentWidget(self.results_tab)
+                return
+            pk = self.collect_pk_inputs()
+            res = self.calc_vancomycin(pk, method)
+            self.results = res
+            self.latest_report = res["report"]
+            self.result_text.setPlainText(res["report"])
+            self.card_primary.update_card(res["primary"], f"{abx} – {method}")
+            self.card_secondary.update_card(res["secondary"], res.get("status_sub", ""))
+            self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
+            self.card_status.update_card(res["status"], res.get("status_sub", ""))
+            self.render_plot(res["plot"])
+            self.append_history_record(pk, res)
+            self.export_status.setText("Riport elkészült és naplózva lett.")
+            self.tabs.setCurrentWidget(self.results_tab)
+        except Exception as exc:
+            QMessageBox.critical(self, "Hiba", str(exc))
+
+    def refresh_context_panels(self):
+        if not hasattr(self, "antibiotic_combo"):
+            return
+        abx = self.antibiotic_combo.currentText()
+        method = self.method_combo.currentText()
+        if hasattr(self, "guide_browser"):
+            self.guide_browser.setHtml(self.build_guide_html(abx, method))
+        if hasattr(self, "evidence_browser"):
+            self.evidence_browser.setHtml(self.build_evidence_html(abx, method))
+
+    def build_guide_html(self, abx: str, method: str) -> str:
+        if abx != "Vancomycin":
+            return "<h2>Info</h2><p>Ehhez az antibiotikumhoz még nincs modell implementálva.</p>"
+        items = []
+        for model in MODELS:
+            flags = ", ".join(model.required_covariates)
+            items.append(
+                f"<li><b>{model.label}</b><br>"
+                f"Populáció: {model.population}<br>"
+                f"Javasolt: metadata-alapú illeszkedés esetén.<br>"
+                f"Nem ideális: ha a kötelező covariate-ek hiányoznak.<br>"
+                f"Flag/covariate: {flags}</li>"
+            )
+        return "<h2>Vancomycin modellek (selector alap)</h2><ul>" + "".join(items) + "</ul>"
+
+    def build_evidence_html(self, abx: str, method: str) -> str:
+        if abx != "Vancomycin":
+            return "<h2>Citációk</h2><p>Ehhez az antibiotikumhoz még nincs modell-specifikus citáció.</p>"
+        parts = ["<h2>Bayesian/populációs modellek</h2>"]
+        for model in MODELS:
+            parts.append(
+                f"<p><b>{model.label}</b><br>"
+                f"Szerző/év: {model.author} ({model.year})<br>"
+                f"Populáció: {model.population}<br>"
+                f"Forrás: modell metadata könyvtár.</p>"
+            )
+        return "".join(parts)
 
     def _configure_history_toolbar_buttons(self) -> None:
         if hasattr(self, "clear_form_btn"):
@@ -477,10 +775,33 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if 0 <= idx < len(rows):
             selected_record_id = str(rows[idx].get("record_id", "")).strip()
             self.history_table.setProperty("selected_history_record_id", selected_record_id)
+            self._restore_episode_events_from_history(rows[idx])
             print(f"[DEBUG][HISTORY] selected record_id={selected_record_id}")
         if hasattr(self, "tabs") and hasattr(self, "input_tab"):
             self.tabs.setCurrentWidget(self.input_tab)
             print("[DEBUG][HISTORY] switched to input tab")
+
+    def _restore_episode_events_from_history(self, row: dict) -> None:
+        if not hasattr(self, "episode_events_table"):
+            return
+        inputs = row.get("inputs") or {}
+        events = inputs.get("episode_events") or []
+        self.episode_events_table.setRowCount(0)
+        for event in events:
+            self._append_episode_event(str(event.get("event_type", "sample")))
+            current = self.episode_events_table.rowCount() - 1
+            mapping = [
+                event.get("time_h", ""),
+                event.get("event_type", ""),
+                event.get("dose_mg", ""),
+                event.get("tinf_h", ""),
+                event.get("level_mg_l", ""),
+                event.get("mic", ""),
+                event.get("creatinine", ""),
+                event.get("note", ""),
+            ]
+            for col, value in enumerate(mapping):
+                self.episode_events_table.setItem(current, col, QTableWidgetItem(str(value)))
 
     def _resolve_selected_history_record_for_update(self) -> dict:
         selected_record_id = str(self.history_table.property("selected_history_record_id") or "").strip()
@@ -624,6 +945,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
             html = pio.to_html(fig, include_plotlyjs="cdn", full_html=False)
             self.plot_view.setHtml(html)
+            if hasattr(self, "viz_plot_view"):
+                self.viz_plot_view.setHtml(html)
             if hasattr(self, "viz_single"):
                 fit = single.get("fit", {})
                 rmse = fit.get("rmse")
@@ -654,6 +977,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     for col, value in enumerate(values):
                         self.model_avg_table.setItem(row, col, QTableWidgetItem(str(value)))
             return
+        if hasattr(self, "viz_plot_view"):
+            self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
         return super().render_plot(spec)
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:
@@ -676,10 +1001,15 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 obesity=bool(pk.get("obesity")),
                 unstable_renal=bool(pk.get("unstable_renal")),
                 hematology=bool(pk.get("hematology")),
+                hsct=bool(pk.get("hsct")),
                 patient_id=str(pk.get("patient_id", "")),
+                patient_name=str(pk.get("patient_name", "")),
                 method=method,
                 height_cm=float(pk.get("height", 170.0)),
+                dose_number=int(pk.get("dose_number", 1)),
+                selected_model_key=(self.model_override_combo.currentData() if hasattr(self, "model_override_combo") else None) or None,
                 history_rows=self.history_data,
+                episode_events=pk.get("episode_events", []),
             )
         )
 
@@ -766,6 +1096,16 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 f"<h3>Final decision</h3><p><b>Kiválasztott modell:</b> {pk_result.get('selected_model_key', '-')}</p>"
                 f"<p>{pk_result.get('final_explanation', '-')}</p>"
             )
+        if hasattr(self, "auto_select_browser"):
+            auto = pk_result.get("auto_selection", {})
+            self.auto_select_browser.setHtml(
+                "<h3>Automatikus modellválasztás</h3>"
+                f"<p><b>Javasolt:</b> {auto.get('recommended_model_key', '-')}</p>"
+                f"<p><b>Alternatívák:</b> {', '.join(auto.get('alternative_model_keys', [])) or 'nincs'}</p>"
+                f"<p><b>Bayesian preferált:</b> {'igen' if auto.get('bayesian_preferred') else 'nem'}</p>"
+                f"<p><b>Trapezoid használható:</b> {'igen' if auto.get('trapezoid_eligible') else 'nem'}</p>"
+                f"<p><b>Indoklás:</b> {auto.get('rationale', '-')}</p>"
+            )
         if hasattr(self, "fit_table"):
             self.fit_table.setRowCount(0)
             for item in pk_result.get("fit_summary", []):
@@ -794,6 +1134,40 @@ class MainWindow(legacy_ui.TDMMainWindow):
             summary = pk_result.get("history_summary_by_antibiotic", {})
             text = "<br/>".join([f"{k}: {v} epizód" for k, v in summary.items()]) if summary else "Nincs korábbi epizód."
             self.history_summary_browser.setHtml(f"<h3>History summary</h3><p>{text}</p>")
+
+    def _export_plot_to_png(self) -> Optional[str]:
+        if not self.results or not MATPLOTLIB_UI_OK:
+            return None
+        spec = (self.results or {}).get("plot") or {}
+        try:
+            import tempfile
+
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            tmp.close()
+            fig = plt.figure(figsize=(10, 5.6), dpi=160)
+            ax = fig.add_subplot(111)
+            if spec.get("single_model"):
+                single = spec["single_model"]
+                ax.plot(single.get("pred_x", []), single.get("pred_y", []), label=f"Single: {single.get('label','model')}", linewidth=2.2, color="#2563eb")
+                ax.scatter(single.get("obs_x", []), single.get("obs_y", []), label="Observed", s=42, color="#16a34a")
+                for event in single.get("dose_events", []):
+                    ax.axvline(float(event.get("time", 0.0)), linestyle="--", linewidth=1.0, color="#94a3b8")
+            if spec.get("model_averaging"):
+                for overlay in spec["model_averaging"].get("overlays", []):
+                    ax.plot(overlay.get("x", []), overlay.get("y", []), linewidth=1.2, alpha=0.55, linestyle=":", label=f"{overlay.get('label','model')} (w={overlay.get('weight',0):.2f})")
+            if not spec.get("single_model"):
+                ax.text(0.5, 0.5, "Még nincs számítási eredmény", transform=ax.transAxes, ha="center", va="center")
+            ax.set_title(spec.get("title", "Vancomycin vizualizáció"))
+            ax.set_xlabel("Óra")
+            ax.set_ylabel("Koncentráció (mg/L)")
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            fig.savefig(tmp.name, format="png", bbox_inches="tight")
+            plt.close(fig)
+            return tmp.name
+        except Exception:
+            return None
 
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(
@@ -827,6 +1201,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "instabil_vese": pk.get("unstable_renal"),
                 "obesitas": pk.get("obesity"),
                 "neutropenia": pk.get("neutropenia"),
+                "hsct": pk.get("hsct"),
+                "arc": pk.get("arc"),
+                "episode_events": pk.get("episode_events", []),
                 "selected_model_key": res.get("pk", {}).get("selected_model_key"),
                 "auto_selection": res.get("pk", {}).get("auto_selection"),
             },

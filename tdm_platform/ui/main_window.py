@@ -116,6 +116,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._history_tab = HistoryTabController(self._history_store)
         super().__init__(current_user=current_user)
         self._last_pk_payload: dict = {}
+        self._last_plot_spec: dict = {}
         self._configure_history_toolbar_buttons()
         self._modernize_vancomycin_ui()
         self.setWindowTitle(APP_NAME)
@@ -193,16 +194,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 layout.addWidget(self.open_visualization_btn)
 
     def _move_summary_cards_to_results(self) -> None:
-        if not all(hasattr(self, name) for name in ("card_primary", "card_secondary", "card_regimen", "card_status")):
-            return
-        layout = self.results_tab.layout()
-        if layout is None:
-            return
-        cards_row = QHBoxLayout()
-        for card in (self.card_status, self.card_regimen, self.card_primary, self.card_secondary):
-            card.setParent(None)
-            cards_row.addWidget(card)
-        layout.insertLayout(0, cards_row)
+        return
 
     def _add_fit_button_to_action_bar(self) -> None:
         if hasattr(self, "model_fit_btn"):
@@ -308,14 +300,32 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.episode_events_table.removeRow(row)
 
     def _build_results_blocks(self) -> None:
-        if hasattr(self, "pkpd_table"):
+        if hasattr(self, "results_splitter"):
             return
         layout = self.results_tab.layout()
         if layout is None:
             return
-        self.pkpd_table = QTableWidget(3, 3)
-        self.pkpd_table.setHorizontalHeaderLabels(["AUC24", "AUC/MIC", "Peak"])
-        self.pkpd_table.setVerticalHeaderLabels(["PK/PD", "Kinetika", "Renális"])
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+        self.results_splitter = QSplitter()
+        layout.addWidget(self.results_splitter, 1)
+        left_box = QWidget()
+        left_layout = QVBoxLayout(left_box)
+        left_layout.addWidget(QLabel("Részletes interpretáció"))
+        self.result_text.setMinimumWidth(620)
+        self.result_text.setMinimumHeight(520)
+        left_layout.addWidget(self.result_text, 1)
+        self.results_splitter.addWidget(left_box)
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        cards_grid = QGridLayout()
+        cards = [self.card_status, self.card_regimen, self.card_primary, self.card_secondary]
+        for i, card in enumerate(cards):
+            card.setParent(None)
+            cards_grid.addWidget(card, i // 2, i % 2)
+        right_layout.addLayout(cards_grid)
         self.auto_select_browser = QTextBrowser()
         self.model_override_combo = QComboBox()
         self.model_override_combo.addItem("Automatikus javaslat", "")
@@ -323,20 +333,28 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.model_override_combo.addItem(model.label, model.key)
         self.model_override_combo.currentIndexChanged.connect(self._on_manual_model_override_changed)
         self.final_decision_browser = QTextBrowser()
+        self.model_meta_browser = QTextBrowser()
         self.fit_table = QTableWidget(0, 9)
         self.fit_table.setHorizontalHeaderLabels(["Modell", "RMSE", "MAE", "Combined", "CL", "Vd", "AUC24", "AUC/MIC", "Státusz"])
         self.recommendation_browser = QTextBrowser()
         self.history_summary_browser = QTextBrowser()
+        self.pkpd_table = QTableWidget(3, 3)
+        self.pkpd_table.setHorizontalHeaderLabels(["AUC24", "AUC/MIC", "Peak"])
+        self.pkpd_table.setVerticalHeaderLabels(["PK/PD", "Kinetika", "Renális"])
         for widget in [
-            self.pkpd_table,
             self.auto_select_browser,
-            self.model_override_combo,
             self.final_decision_browser,
-            self.fit_table,
+            self.model_meta_browser,
+            self.pkpd_table,
+            self.model_override_combo,
             self.recommendation_browser,
+            self.fit_table,
             self.history_summary_browser,
         ]:
-            layout.insertWidget(0, widget)
+            right_layout.addWidget(widget)
+        right_layout.addStretch(1)
+        self.results_splitter.addWidget(right_box)
+        self.results_splitter.setSizes([760, 520])
 
     def _build_visualization_tab(self) -> None:
         if hasattr(self, "viz_mode_tabs"):
@@ -369,8 +387,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.viz_averaging = QTextBrowser()
         self.viz_mode_tabs.addTab(self.viz_single, "Single model")
         self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
+        self.viz_mode_tabs.currentChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
         layout.addWidget(self.viz_mode_tabs)
-        self.viz_plot_view = QTextBrowser()
+        if hasattr(self, "plot_view") and self.plot_view is not None:
+            self.viz_plot_view = self.plot_view
+        else:
+            self.viz_plot_view = QTextBrowser()
+        self.viz_plot_view.setMinimumHeight(460)
         self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
         layout.addWidget(self.viz_plot_view, 1)
         self.model_avg_table = QTableWidget(0, 6)
@@ -966,11 +989,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
 
     def render_plot(self, spec: dict):
+        self._last_plot_spec = spec or {}
         if spec.get("single_model") and spec.get("model_averaging"):
             single = spec["single_model"]
             avg = spec["model_averaging"]
             fig = go.Figure()
-            if not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked():
+            show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
+            if show_averaging and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
                 for overlay in avg.get("overlays", []):
                     fig.add_trace(
                         go.Scatter(
@@ -982,7 +1007,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                             opacity=0.6,
                         )
                     )
-            if not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked():
+            if (not show_averaging) and (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()):
                 fig.add_trace(go.Scatter(x=single["pred_x"], y=single["pred_y"], mode="lines", name=f"Single: {single['label']}"))
             if not hasattr(self, "toggle_obs") or self.toggle_obs.isChecked():
                 fig.add_trace(go.Scatter(x=single["obs_x"], y=single["obs_y"], mode="markers", name="Observed", marker=dict(size=10, color="green")))
@@ -1099,10 +1124,6 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "",
             "Előzmény panel (minden antibiotikum)",
             f"- Korábbi epizódok: {history_text}",
-            "",
-            "Recommendation",
-            f"- Státusz: {result['status']}",
-            f"- Javasolt séma: {result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
         ]
 
         plot = result.get("plot") or {
@@ -1158,6 +1179,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 f"<p><b>Trapezoid használható:</b> {'igen' if auto.get('trapezoid_eligible') else 'nem'}</p>"
                 f"<p><b>Indoklás:</b> {auto.get('rationale', '-')}</p>"
             )
+        if hasattr(self, "model_meta_browser"):
+            selected_key = pk_result.get("selected_model_key")
+            selected = next((m for m in MODELS if m.key == selected_key), None)
+            if selected is None:
+                self.model_meta_browser.setHtml("<h3>Modell meta</h3><p>Nincs kiválasztott modell.</p>")
+            else:
+                self.model_meta_browser.setHtml(
+                    "<h3>Modell meta</h3>"
+                    f"<p><b>{selected.label}</b></p>"
+                    f"<p>Populáció: {selected.population}</p>"
+                    f"<p>Kötelező covariate-ek: {', '.join(selected.required_covariates)}</p>"
+                )
         if hasattr(self, "fit_table"):
             self.fit_table.setRowCount(0)
             for item in pk_result.get("fit_summary", []):

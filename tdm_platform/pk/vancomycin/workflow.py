@@ -129,7 +129,7 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
     manual_model_key = str(raw_selected_model).strip() if raw_selected_model is not None else None
     if manual_model_key in {"", "None", "null"}:
         manual_model_key = None
-    if manual_model_key:
+    if manual_model_key and manual_model_key != "trapezoid_classic":
         selection = replace(
             selection,
             recommended_model_key=manual_model_key,
@@ -159,6 +159,12 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
     )
     if not ranking:
         raise ValueError("A modellillesztéshez legalább két mérési pont szükséges.")
+
+    if manual_model_key and manual_model_key != "trapezoid_classic":
+        forced = next((fit for fit in ranking if fit.model_key == manual_model_key), None)
+        if forced is not None:
+            remaining = tuple(fit for fit in ranking if fit.model_key != manual_model_key)
+            ranking = (forced, *remaining)
 
     final = rank_final_model(ranking, clinical_expected_key=selection.recommended_model_key)
     best = ranking[0]

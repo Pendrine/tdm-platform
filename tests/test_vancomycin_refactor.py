@@ -156,3 +156,46 @@ def test_engine_bayesian_path_contains_auto_select_and_fit_summary():
     assert result["auto_selection"]["recommended_model_key"]
     assert result["selected_model_key"]
     assert len(result["fit_summary"]) >= 2
+
+
+def test_engine_trapezoid_override_does_not_crash_and_sets_explanation():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Auto",
+            selected_model_key="trapezoid_classic",
+        )
+    )
+    assert result["selected_model_key"] == "trapezoid_classic"
+    assert "Klasszikus trapezoid" in result["final_explanation"]
+
+
+def test_engine_manual_model_override_is_reflected_in_selected_model():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Auto",
+            selected_model_key="thomson_2009",
+        )
+    )
+    assert result["selected_model_key"] == "thomson_2009"

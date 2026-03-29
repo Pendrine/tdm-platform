@@ -159,7 +159,7 @@ def calculate(inp: VancomycinInputs) -> dict:
     best = workflow["best"]
     auto = workflow["auto_selection"]
     classical_forced = inp.selected_model_key == "trapezoid_classic" or inp.method == "Klasszikus"
-    classical_auto = inp.method == "Auto" and auto.trapezoid_eligible and not auto.bayesian_preferred
+    classical_auto = inp.method == "Auto" and not inp.selected_model_key and auto.trapezoid_eligible and not auto.bayesian_preferred
     use_classical = classical_forced or classical_auto
     if use_classical:
         cl_used = base["cl_l_h"]
@@ -170,6 +170,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         pred_ke = base["ke"]
         pred_half_life = base["half_life"]
         selected_model_key = "trapezoid_classic"
+        final_explanation = "Klasszikus trapezoid (steady-state) számítás kényszerítve; a végső PK értékek ezt a modellt követik."
     else:
         cl_used = best.cl_l_h
         vd_used = best.vd_l
@@ -179,6 +180,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         pred_ke = cl_used / vd_used
         pred_half_life = math.log(2) / pred_ke
         selected_model_key = workflow["final"].selected_model_key
+        final_explanation = workflow["final"].explanation
     crcl = workflow["crcl"]
     auto_selection = {
         "recommended_model_key": auto.recommended_model_key,
@@ -200,7 +202,6 @@ def calculate(inp: VancomycinInputs) -> dict:
         }
         for fit in workflow["final"].ranking
     ]
-    final_explanation = workflow["final"].explanation
     history_summary_by_antibiotic = workflow.get("history_summary_by_antibiotic", {})
     missing_covariates = workflow.get("missing_covariates", {})
 

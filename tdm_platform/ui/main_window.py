@@ -1463,9 +1463,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
         if hasattr(self, "model_meta_browser"):
             selected_key = pk_result.get("selected_model_key")
-            selected = next((m for m in MODELS if m.key == selected_key), None)
+            if selected_key == "trapezoid_classic":
+                self.model_meta_browser.setHtml(
+                    "<h3>Modell meta</h3><p><b>Klasszikus trapezoid (steady-state)</b></p>"
+                    "<p>Nem populációs/Bayesian modell, hanem kétpontos klasszikus becslés.</p>"
+                )
+                selected = None
+            else:
+                selected = next((m for m in MODELS if m.key == selected_key), None)
             if selected is None:
-                self.model_meta_browser.setHtml("<h3>Modell meta</h3><p>Nincs kiválasztott modell.</p>")
+                if selected_key != "trapezoid_classic":
+                    self.model_meta_browser.setHtml("<h3>Modell meta</h3><p>Nincs kiválasztott modell.</p>")
             else:
                 self.model_meta_browser.setHtml(
                     "<h3>Modell meta</h3>"

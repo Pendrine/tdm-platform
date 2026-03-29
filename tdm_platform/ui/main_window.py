@@ -305,15 +305,31 @@ class MainWindow(legacy_ui.TDMMainWindow):
         layout = self.results_tab.layout()
         if layout is None:
             return
+        result_text_widget = getattr(self, "result_text", None)
+        if result_text_widget is not None and isValid(result_text_widget):
+            result_text_widget.setParent(None)
+        plot_widget = getattr(self, "plot_view", None)
+        if plot_widget is not None and isValid(plot_widget):
+            plot_widget.setParent(None)
+        for card_name in ("card_status", "card_regimen", "card_primary", "card_secondary"):
+            card = getattr(self, card_name, None)
+            if card is not None and isValid(card):
+                card.setParent(None)
         while layout.count():
             item = layout.takeAt(0)
             if item.widget():
-                item.widget().setParent(None)
+                item.widget().deleteLater()
         self.results_splitter = QSplitter()
         layout.addWidget(self.results_splitter, 1)
         left_box = QWidget()
         left_layout = QVBoxLayout(left_box)
         left_layout.addWidget(QLabel("Részletes interpretáció"))
+        if result_text_widget is None or not isValid(result_text_widget):
+            result_text_widget = QPlainTextEdit()
+            result_text_widget.setReadOnly(True)
+            self.result_text = result_text_widget
+        else:
+            self.result_text = result_text_widget
         self.result_text.setMinimumWidth(620)
         self.result_text.setMinimumHeight(520)
         left_layout.addWidget(self.result_text, 1)

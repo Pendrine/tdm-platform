@@ -1,0 +1,158 @@
+from datetime import datetime
+
+from tdm_platform.pk.vancomycin.domain import AntibioticEpisode, EpisodeEvent, Patient
+from tdm_platform.pk.vancomycin.fit_engine import fit_models
+from tdm_platform.pk.vancomycin.history import find_matching_episode_history
+from tdm_platform.pk.vancomycin.model_library import MODELS
+from tdm_platform.pk.vancomycin.recommendation_engine import build_recommendation
+from tdm_platform.pk.vancomycin.selector import auto_select_model
+from tdm_platform.pk.vancomycin.weights import build_weight_metrics, crcl_from_metrics
+from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calc_auc_trapezoid, calculate
+
+
+def _episode(**flags):
+    patient = Patient(
+        patient_id="P-1",
+        patient_name="Teszt Elek",
+        sex="férfi",
+        age=60,
+        height_cm=175,
+        tbw_kg=110 if flags.get("obese") else 80,
+        scr_umol=100,
+        icu_flag=flags.get("icu", False),
+        unstable_renal_flag=flags.get("unstable_renal", False),
+        hematology_flag=flags.get("hematology", False),
+        hsct_flag=flags.get("hsct", False),
+        hemodialysis_flag=flags.get("dialysis", False),
+    )
+    now = datetime.utcnow()
+    return AntibioticEpisode(
+        episode_id="EP-1",
+        antibiotic="Vancomycin",
+        patient=patient,
+        events=(
+            EpisodeEvent("maintenance_dose", now, 1000.0, "mg", {"tau_h": 12.0, "tinf_h": 1.0, "t_from_last_start_h": 0.0}),
+            EpisodeEvent("sample", now, 22.0, "mg/L", {"t_from_last_start_h": 2.0}),
+            EpisodeEvent("sample", now, 12.0, "mg/L", {"t_from_last_start_h": 10.0}),
+        ),
+    )
+
+
+def test_weight_metrics_tbw_ibw_adjbw_and_obesity_flag():
+    m = build_weight_metrics("férfi", 175, 110)
+    assert m.tbw_kg == 110
+    assert m.ibw_kg > 0
+    assert m.adjbw_kg > m.ibw_kg
+    assert m.obesity_flag
+
+
+def test_crcl_calculation_supports_weight_strategies():
+    m = build_weight_metrics("férfi", 175, 110)
+    crcl_tbw = crcl_from_metrics(60, "férfi", 100, m, "tbw")
+    crcl_adjbw = crcl_from_metrics(60, "férfi", 100, m, "adjbw")
+    assert crcl_tbw != crcl_adjbw
+
+
+def test_trapezoid_auc_and_auc_mic_and_suggestion():
+    inp = VancomycinInputs(
+        sex="férfi",
+        age=60,
+        weight_kg=80,
+        scr_umol=100,
+        dose_mg=1000,
+        tau_h=12,
+        tinf_h=1,
+        c1=25,
+        t1_start_h=2,
+        c2=12,
+        t2_start_h=10,
+        mic=1.0,
+        method="Klasszikus",
+    )
+    auc = calc_auc_trapezoid(inp)
+    result = calculate(inp)
+    assert auc["auc24"] > 0
+    assert result["auc_mic"] == result["auc24"]
+    assert result["suggestion"]["best"]["dose"] > 0
+
+
+def test_selector_icu_obese_hsct_and_bayes_preference():
+    ep_icu = _episode(icu=True)
+    sel_icu = auto_select_model(ep_icu, build_weight_metrics("férfi", 175, 80), dose_number=1, has_previous_episode=False)
+    assert sel_icu.recommended_model_key in {"revilla_2010", "roberts_2011"}
+    assert sel_icu.bayesian_preferred
+
+    ep_obese = _episode(obese=True)
+    sel_obese = auto_select_model(ep_obese, build_weight_metrics("férfi", 175, 110), dose_number=3, has_previous_episode=False)
+    assert sel_obese.recommended_model_key == "adane_2015"
+
+    ep_hsct = _episode(hsct=True, hematology=True)
+    sel_hsct = auto_select_model(ep_hsct, build_weight_metrics("férfi", 175, 80), dose_number=2, has_previous_episode=False)
+    assert sel_hsct.recommended_model_key == "okada_2018"
+
+
+def test_selector_dialysis_warning_path():
+    ep = _episode(dialysis=True)
+    sel = auto_select_model(ep, build_weight_metrics("férfi", 175, 80), dose_number=2, has_previous_episode=False)
+    assert "Hemodialysis" in sel.rationale
+
+
+def test_fit_engine_ranking_rmse_mae_and_combined_score():
+    ep = _episode()
+    ranking = fit_models(
+        ep,
+        MODELS,
+        weights=build_weight_metrics("férfi", 175, 80),
+        mic=1.0,
+        prior_bonus={"goti_2018": 1.0},
+        consistency_bonus={"goti_2018": 1.0},
+    )
+    assert len(ranking) >= 2
+    assert ranking[0].rmse >= 0
+    assert ranking[0].mae >= 0
+    assert ranking[0].combined_score >= ranking[1].combined_score
+
+
+def test_history_match_patient_id_and_name_and_antibiotic_filter():
+    rows = [
+        {"patient_id": "P-1", "drug": "Vancomycin", "inputs": {"patient_name": "Teszt Elek"}},
+        {"patient_id": "P-2", "drug": "Vancomycin", "inputs": {"patient_name": "teszt   elek"}},
+        {"patient_id": "P-1", "drug": "Linezolid", "inputs": {"patient_name": "Teszt Elek"}},
+    ]
+    by_id = find_matching_episode_history(rows, "P-1", "", "Vancomycin")
+    by_name = find_matching_episode_history(rows, "", "teszt elek", "Vancomycin")
+    assert len(by_id) == 1
+    assert len(by_name) == 2
+
+
+def test_recommendation_under_over_exposure_and_auc_mic():
+    under = build_recommendation(auc24=300, trough=8, auc_mic=300, target_auc=500, persistent_underexposure=True, persistent_overexposure=False)
+    over = build_recommendation(auc24=700, trough=25, auc_mic=700, target_auc=500, persistent_underexposure=False, persistent_overexposure=True)
+    assert under.status == "Alulexpozíció"
+    assert "alternatív antibiotikum" in under.text
+    assert over.status == "Túlexpozíció"
+    assert over.toxicity_risk == "emelkedett"
+
+
+def test_engine_bayesian_path_contains_auto_select_and_fit_summary():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Bayesian",
+            patient_id="P-1",
+            patient_name="Teszt Elek",
+        )
+    )
+    assert result["auto_selection"]["recommended_model_key"]
+    assert result["selected_model_key"]
+    assert len(result["fit_summary"]) >= 2

@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from shiboken6 import isValid
+import plotly.graph_objects as go
+import plotly.io as pio
 
 from tdm_platform.app_meta import APP_NAME
 from tdm_platform.core.auth import UserStore, ensure_special_roles
@@ -25,7 +27,7 @@ from tdm_platform.core.models import HistoryRecord, SMTPSettings
 from tdm_platform.core.permissions import is_primary_moderator
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
-from tdm_platform.pk.vancomycin_engine import calculate as calculate_vancomycin
+from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as calculate_vancomycin
 from tdm_platform.services.pdf_service import render_simple_report_pdf
 from tdm_platform.services.smtp_service import SMTPSettingsStore, get_smtp_settings
 from tdm_platform.storage.paths import (
@@ -425,6 +427,127 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         QApplication.instance().quit()
 
+
+    def render_plot(self, spec: dict):
+        if spec.get("single_model") and spec.get("model_averaging"):
+            single = spec["single_model"]
+            avg = spec["model_averaging"]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=single["pred_x"], y=single["pred_y"], mode="lines", name=f"Single: {single['label']}"))
+            fig.add_trace(go.Scatter(x=single["obs_x"], y=single["obs_y"], mode="markers", name="Observed", marker=dict(size=10)))
+            for overlay in avg.get("overlays", []):
+                fig.add_trace(
+                    go.Scatter(
+                        x=overlay["x"],
+                        y=overlay["y"],
+                        mode="lines",
+                        name=f"Avg {overlay['label']} (w={overlay['weight']:.2f})",
+                        line=dict(width=1, dash="dot"),
+                        opacity=0.6,
+                    )
+                )
+            fig.update_layout(
+                title=f"{spec.get('title', 'Vancomycin')} — Single model + Model averaging",
+                xaxis_title="Óra",
+                yaxis_title="Koncentráció (mg/L)",
+                template="plotly_white",
+                margin=dict(l=30, r=30, t=50, b=30),
+            )
+            self.plot_view.setHtml(pio.to_html(fig, include_plotlyjs="cdn", full_html=False))
+            return
+        return super().render_plot(spec)
+
+    def calc_vancomycin(self, pk: dict, method: str) -> dict:
+        result = calculate_vancomycin(
+            VancomycinInputs(
+                sex=str(pk["sex"]),
+                age=float(pk["age"]),
+                weight_kg=float(pk["weight"]),
+                scr_umol=float(pk["scr_umol"]),
+                dose_mg=float(pk["dose"]),
+                tau_h=float(pk["tau"]),
+                tinf_h=float(pk["tinf"]),
+                c1=float(pk["c1"]),
+                t1_start_h=float(pk["t1"]),
+                c2=float(pk["c2"]),
+                t2_start_h=float(pk["t2"]),
+                target_auc=float(pk.get("target_auc", 500.0)),
+                mic=pk.get("mic"),
+                icu=bool(pk.get("icu")),
+                obesity=bool(pk.get("obesity")),
+                unstable_renal=bool(pk.get("unstable_renal")),
+                hematology=bool(pk.get("hematology")),
+                patient_id=str(pk.get("patient_id", "")),
+                method=method,
+                height_cm=float(pk.get("height", 170.0)),
+                history_rows=self.history_data,
+            )
+        )
+
+        auto = result.get("auto_selection", {})
+        fit_summary = result.get("fit_summary", [])
+        fit_lines = [
+            f"- {item['model_key']}: RMSE {item['rmse']:.2f}, MAE {item['mae']:.2f}, score {item['combined_score']:.3f}"
+            for item in fit_summary[:5]
+        ]
+        history_summary = result.get("history_summary_by_antibiotic", {})
+        history_text = ", ".join(f"{k}: {v}" for k, v in history_summary.items()) if history_summary else "nincs korábbi epizód"
+
+        report = [
+            f"VANCOMYCIN – {method}",
+            "",
+            "Auto-select",
+            f"- Ajánlott modell: {auto.get('recommended_model_key', '-')}",
+            f"- Alternatívák: {', '.join(auto.get('alternative_model_keys', [])) if auto.get('alternative_model_keys') else 'nincs'}",
+            f"- Bayesian preferált: {'igen' if auto.get('bayesian_preferred') else 'nem'}",
+            f"- Trapezoid használható: {'igen' if auto.get('trapezoid_eligible') else 'nem'}",
+            f"- Indoklás: {auto.get('rationale', '-')}",
+            "",
+            "PK/PD",
+            f"- AUC24: {result['auc24']:.1f} mg·h/L",
+            f"- AUC/MIC: {'n.a.' if result['auc_mic'] is None else format(result['auc_mic'], '0.1f')}",
+            f"- Peak: {result['peak']:.1f} mg/L | Trough: {result['trough']:.1f} mg/L",
+            f"- CL: {result['cl_l_h']:.2f} L/h | Vd: {result['vd_l']:.2f} L | CrCl: {result['crcl']:.1f} mL/perc",
+            "",
+            "Final ranker",
+            f"- Kiválasztott modell: {result.get('selected_model_key', '-')}",
+            f"- Magyarázat: {result.get('final_explanation', '-')}",
+            "",
+            "Model fit rangsor",
+            *(fit_lines or ["- nincs modellillesztési adat"]),
+            "",
+            "Előzmény panel (minden antibiotikum)",
+            f"- Korábbi epizódok: {history_text}",
+            "",
+            "Recommendation",
+            f"- Státusz: {result['status']}",
+            f"- Javasolt séma: {result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
+        ]
+
+        plot = result.get("plot") or {
+            "title": "Vancomycin koncentráció-idő profil",
+            "current_x": [pk["t1"], pk["t2"]],
+            "current_y": [result["peak"], result["trough"]],
+            "best_x": [pk["t1"], pk["t2"]],
+            "best_y": [result["peak"], result["trough"]],
+            "obs_x": [pk["t1"], pk["t2"]],
+            "obs_y": [pk["c1"], pk["c2"]],
+        }
+
+        return {
+            "drug": "Vancomycin",
+            "method": method,
+            "status": result["status"],
+            "primary": f"AUC24 {result['auc24']:.1f}",
+            "secondary": f"CL {result['cl_l_h']:.2f} L/h",
+            "regimen": f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
+            "status_sub": auto.get("rationale", result["status"]),
+            "report": "\n".join(report),
+            "pk": result,
+            "suggestion": result["suggestion"],
+            "plot": plot,
+        }
+
     def append_history_record(self, pk: dict, res: dict):
         record = HistoryRecord(
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -457,6 +580,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "instabil_vese": pk.get("unstable_renal"),
                 "obesitas": pk.get("obesity"),
                 "neutropenia": pk.get("neutropenia"),
+                "selected_model_key": res.get("pk", {}).get("selected_model_key"),
+                "auto_selection": res.get("pk", {}).get("auto_selection"),
             },
         )
         self.history_data = self._history_store.append(record)

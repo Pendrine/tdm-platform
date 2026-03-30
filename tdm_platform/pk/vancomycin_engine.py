@@ -130,21 +130,45 @@ def calculate(inp: VancomycinInputs) -> dict:
         r_payload = build_r_input(inp)
         r_out = run_r_engine(r_payload)
         if r_out.get("status") == "ok" and not r_out.get("errors"):
+            scr_mg_dl = inp.scr_umol / UMOL_PER_MGDL_CREATININE
+            crcl = cockcroft_gault(age=inp.age, sex=inp.sex, weight_kg=inp.weight_kg, scr_mg_dl=scr_mg_dl)
+            cl_l_h = float(r_out.get("posterior_cl_l_h") or 0.0)
+            vd_l = float(r_out.get("posterior_vd_l") or 0.0)
+            peak = float(r_out.get("predicted_peak") or 0.0)
+            trough = float(r_out.get("predicted_trough") or 0.0)
             auc24 = float(r_out.get("auc24") or 0.0)
             auc_mic = r_out.get("auc_mic")
+            plot_payload = map_r_output_to_plot_payload(r_out)
+            has_plot = bool(plot_payload.get("current_x") or plot_payload.get("obs_x"))
             status = "Célzónában"
             if auc24 < TARGET_AUC_LOW:
                 status = "Alulexpozíció"
             elif auc24 > TARGET_AUC_HIGH:
                 status = "Túlexpozíció"
+            print(
+                "[DEBUG][ENGINE] R mapped result keys:",
+                sorted(["cl_l_h", "vd_l", "auc24", "auc_mic", "peak", "trough", "crcl"]),
+            )
+            print(
+                "[DEBUG][ENGINE] R mapped values:",
+                {
+                    "cl_l_h": cl_l_h,
+                    "vd_l": vd_l,
+                    "crcl": crcl,
+                    "auc24": auc24,
+                    "has_plot": has_plot,
+                    "used_r_backend": True,
+                    "fallback_used": False,
+                },
+            )
             return {
                 "status": status,
-                "crcl": None,
+                "crcl": crcl,
                 "auc24": auc24,
-                "trough": float(r_out.get("predicted_trough") or 0.0),
-                "peak": float(r_out.get("predicted_peak") or 0.0),
-                "cl_l_h": float(r_out.get("posterior_cl_l_h") or 0.0),
-                "vd_l": float(r_out.get("posterior_vd_l") or 0.0),
+                "trough": trough,
+                "peak": peak,
+                "cl_l_h": cl_l_h,
+                "vd_l": vd_l,
                 "half_life": 0.0,
                 "ke": 0.0,
                 "auc_mic": auc_mic,
@@ -162,7 +186,7 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "final_explanation": "Bayesian becslés R backenddel (MAP).",
                 "history_summary_by_antibiotic": {},
                 "missing_covariates": {},
-                "plot": map_r_output_to_plot_payload(r_out),
+                "plot": plot_payload,
                 "classical_reference": base,
                 "event_summary": {},
                 "fit_debug": {},

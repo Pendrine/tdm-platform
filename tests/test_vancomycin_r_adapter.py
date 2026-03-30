@@ -158,6 +158,66 @@ def test_bayesian_branch_not_classical_when_r_backend_ok():
         )
     assert result["engine_source"] == "R_BACKEND"
     assert result["used_r_backend"] is True
+    assert result["fallback_used"] is False
+    assert result["cl_l_h"] == 5.0
+    assert result["vd_l"] == 70.0
+    assert result["peak"] == 30.0
+    assert result["trough"] == 12.0
+    assert result["auc24"] == 500.0
+    assert result["auc_mic"] == 500.0
+    assert result["crcl"] is not None
+    assert result["fit_summary"] == []
+
+
+def test_bayesian_r_output_builds_complete_plot_payload():
+    fake_r = {
+        "status": "ok",
+        "engine": "R_Bayesian",
+        "model_key": "goti_2018",
+        "auc24": 480.0,
+        "auc_mic": None,
+        "predicted_peak": 28.0,
+        "predicted_trough": 11.0,
+        "posterior_cl_l_h": 4.8,
+        "posterior_vd_l": 65.0,
+        "curve": {"x": [0, 6, 12], "y": [28, 17, 11]},
+        "observed": {"x": [2, 10], "y": [24, 13]},
+        "dose_events": [{"event_type": "maintenance_dose", "time": 0, "dose": 1000}],
+        "warnings": [],
+        "errors": [],
+        "debug": {"selector_debug": {"manual": False}},
+    }
+    with patch("tdm_platform.pk.vancomycin_engine.run_r_engine", return_value=fake_r):
+        result = calculate(
+            VancomycinInputs(
+                sex="férfi",
+                age=60,
+                weight_kg=80,
+                scr_umol=100,
+                dose_mg=1000,
+                tau_h=12,
+                tinf_h=1,
+                c1=25,
+                t1_start_h=2,
+                c2=12,
+                t2_start_h=10,
+                method="Bayesian",
+            )
+        )
+    plot = result["plot"]
+    assert plot["single_model"]["pred_x"] == [0, 6, 12]
+    assert plot["single_model"]["pred_y"] == [28, 17, 11]
+    assert plot["single_model"]["obs_x"] == [2, 10]
+    assert plot["single_model"]["obs_y"] == [24, 13]
+    assert plot["dose_events"]
+    assert plot["current_x"] == [0, 6, 12]
+    assert plot["current_y"] == [28, 17, 11]
+    assert plot["best_x"] == [0, 6, 12]
+    assert plot["best_y"] == [28, 17, 11]
+    assert plot["obs_x"] == [2, 10]
+    assert plot["obs_y"] == [24, 13]
+    assert "metadata" in plot
+    assert "debug" in plot["metadata"]
 
 
 def test_classical_branch_is_classical_python():

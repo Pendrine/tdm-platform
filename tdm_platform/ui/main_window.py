@@ -695,6 +695,15 @@ class MainWindow(legacy_ui.TDMMainWindow):
             raise ValueError(f"A(z) {field} mező kötelező és numerikus értéket vár.")
         return value
 
+    @staticmethod
+    def _fmt_float(value: object, digits: int = 2, na: str = "n/a") -> str:
+        try:
+            if value is None:
+                return na
+            return f"{float(value):.{digits}f}"
+        except (TypeError, ValueError):
+            return na
+
     def _sync_input_panel_to_episode_events(self) -> None:
         if not hasattr(self, "episode_events_table"):
             return
@@ -1475,6 +1484,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 episode_events=pk.get("episode_events", []),
             )
         )
+        print("[DEBUG][UI] mapped result keys:", sorted(result.keys()))
+        print(
+            "[DEBUG][UI] mapped values:",
+            {
+                "cl_l_h": result.get("cl_l_h"),
+                "vd_l": result.get("vd_l"),
+                "crcl": result.get("crcl"),
+                "auc24": result.get("auc24"),
+                "has_plot": bool((result.get("plot") or {}).get("current_x") or (result.get("plot") or {}).get("obs_x")),
+                "used_r_backend": result.get("used_r_backend"),
+                "fallback_used": result.get("fallback_used"),
+            },
+        )
 
         auto = result.get("auto_selection", {})
         fit_summary = result.get("fit_summary", [])
@@ -1497,10 +1519,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             f"- Indoklás: {auto.get('rationale', '-')}",
             "",
             "PK/PD",
-            f"- AUC24: {result['auc24']:.1f} mg·h/L",
-            f"- AUC/MIC: {'n.a.' if result['auc_mic'] is None else format(result['auc_mic'], '0.1f')}",
-            f"- Peak: {result['peak']:.1f} mg/L | Trough: {result['trough']:.1f} mg/L",
-            f"- CL: {result['cl_l_h']:.2f} L/h | Vd: {result['vd_l']:.2f} L | CrCl: {result['crcl']:.1f} mL/perc",
+            f"- AUC24: {self._fmt_float(result.get('auc24'), 1)} mg·h/L",
+            f"- AUC/MIC: {self._fmt_float(result.get('auc_mic'), 1, na='n.a.')}",
+            f"- Peak: {self._fmt_float(result.get('peak'), 1)} mg/L | Trough: {self._fmt_float(result.get('trough'), 1)} mg/L",
+            f"- CL: {self._fmt_float(result.get('cl_l_h'), 2)} L/h | Vd: {self._fmt_float(result.get('vd_l'), 2)} L | CrCl: {self._fmt_float(result.get('crcl'), 1)} mL/perc",
             "",
             "Final ranker",
             f"- Kiválasztott modell: {result.get('selected_model_key', '-')}",
@@ -1585,8 +1607,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "drug": "Vancomycin",
             "method": method,
             "status": result["status"],
-            "primary": f"AUC24 {result['auc24']:.1f}",
-            "secondary": f"CL {result['cl_l_h']:.2f} L/h",
+            "primary": f"AUC24 {self._fmt_float(result.get('auc24'), 1)}",
+            "secondary": f"CL {self._fmt_float(result.get('cl_l_h'), 2)} L/h",
             "regimen": f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
             "status_sub": auto.get("rationale", result["status"]),
             "report": "\n".join(report),
@@ -1606,9 +1628,21 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         if hasattr(self, "pkpd_table"):
             rows = [
-                [f"{pk_result.get('auc24', 0.0):.1f}", f"{pk_result.get('auc_mic', 'n.a.')}", f"{pk_result.get('peak', 0.0):.1f}"],
-                [f"Trough {pk_result.get('trough', 0.0):.1f}", f"CL {pk_result.get('cl_l_h', 0.0):.2f}", f"Vd {pk_result.get('vd_l', 0.0):.2f}"],
-                [f"ke {pk_result.get('ke', 0.0):.3f}", f"Half-life {pk_result.get('half_life', 0.0):.2f}", f"CrCl {pk_result.get('crcl', 0.0):.1f}"],
+                [
+                    self._fmt_float(pk_result.get("auc24"), 1),
+                    self._fmt_float(pk_result.get("auc_mic"), 1),
+                    self._fmt_float(pk_result.get("peak"), 1),
+                ],
+                [
+                    f"Trough {self._fmt_float(pk_result.get('trough'), 1)}",
+                    f"CL {self._fmt_float(pk_result.get('cl_l_h'), 2)}",
+                    f"Vd {self._fmt_float(pk_result.get('vd_l'), 2)}",
+                ],
+                [
+                    f"ke {self._fmt_float(pk_result.get('ke'), 3)}",
+                    f"Half-life {self._fmt_float(pk_result.get('half_life'), 2)}",
+                    f"CrCl {self._fmt_float(pk_result.get('crcl'), 1)}",
+                ],
             ]
             for r, row in enumerate(rows):
                 for c, value in enumerate(row):

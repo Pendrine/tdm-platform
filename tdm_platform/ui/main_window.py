@@ -574,7 +574,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             abx = self.antibiotic_combo.currentText()
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
-            res = self.calc_vancomycin(pk, "Auto")
+            method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+            res = self.calc_vancomycin(pk, method or "Auto")
             self.results = res
             self.latest_report = res["report"]
             self.result_text.setPlainText(res["report"])
@@ -878,7 +879,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 return
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
-            res = self.calc_vancomycin(pk, "Auto")
+            method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+            res = self.calc_vancomycin(pk, method or "Auto")
             self.results = res
             self.latest_report = res["report"]
             self.result_text.setPlainText(res["report"])
@@ -1476,6 +1478,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
         report = [
             f"VANCOMYCIN – {method}",
+            f"Számolási motor: {'R Bayesian backend' if result.get('engine_source') == 'R_BACKEND' else ('Python fallback' if result.get('engine_source') == 'PYTHON_FALLBACK' else 'Klasszikus Python')}",
             "",
             "Auto-select",
             f"- Ajánlott modell: {auto.get('recommended_model_key', '-')}",
@@ -1557,6 +1560,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "warnings": result.get("warnings", []),
                 "errors": result.get("errors", []),
             }
+        plot.setdefault("metadata", {})
+        if isinstance(plot["metadata"], dict):
+            plot["metadata"].update(
+                {
+                    "engine_source": result.get("engine_source"),
+                    "used_r_backend": result.get("used_r_backend"),
+                    "fallback_used": result.get("fallback_used"),
+                    "fallback_reason": result.get("fallback_reason"),
+                    "debug": result.get("debug", {}),
+                }
+            )
 
         ui_result = {
             "drug": "Vancomycin",
@@ -1570,6 +1584,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "pk": result,
             "suggestion": result["suggestion"],
             "plot": plot,
+            "engine_source": result.get("engine_source"),
+            "used_r_backend": result.get("used_r_backend"),
+            "fallback_used": result.get("fallback_used"),
+            "fallback_reason": result.get("fallback_reason"),
         }
         self._update_structured_result_views(result)
         return ui_result

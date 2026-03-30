@@ -118,6 +118,7 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
 
 
 def calculate(inp: VancomycinInputs) -> dict:
+    print(f"[DEBUG][ENGINE] method={inp.method} selected_model_key={inp.selected_model_key}")
     if inp.t1_start_h <= inp.tinf_h:
         raise ValueError("Vancomycinnél az 1. minta az infúzió vége után legyen.")
     if inp.t2_start_h >= inp.tau_h:
@@ -125,6 +126,7 @@ def calculate(inp: VancomycinInputs) -> dict:
 
     base = calc_auc_trapezoid(inp)
     if inp.method == "Bayesian":
+        print("[DEBUG][ENGINE] ENGINE=R_BACKEND")
         r_payload = build_r_input(inp)
         r_out = run_r_engine(r_payload)
         if r_out.get("status") == "ok" and not r_out.get("errors"):
@@ -168,10 +170,16 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "errors": r_out.get("errors", []),
                 "debug": r_out.get("debug", {}),
                 "engine": "Bayesian_R",
+                "engine_source": "R_BACKEND",
+                "used_r_backend": True,
+                "fallback_used": False,
+                "fallback_reason": "",
             }
         # Fail-safe fallback to Python workflow path with explicit warning.
         fallback_warning = f"R backend fallback: {', '.join(r_out.get('errors', []) or ['ismeretlen hiba'])}"
+        print("[DEBUG][ENGINE] ENGINE=PYTHON_FALLBACK")
     else:
+        print("[DEBUG][ENGINE] ENGINE=CLASSICAL_PYTHON")
         fallback_warning = None
     workflow = run_vancomycin_workflow(
         {
@@ -306,4 +314,8 @@ def calculate(inp: VancomycinInputs) -> dict:
         "errors": workflow.get("errors", []),
         "debug": workflow.get("debug", {}),
         "engine": "Klasszikus_Python",
+        "engine_source": "PYTHON_FALLBACK" if fallback_warning else "CLASSICAL_PYTHON",
+        "used_r_backend": False,
+        "fallback_used": bool(fallback_warning),
+        "fallback_reason": fallback_warning or "",
     }

@@ -79,6 +79,7 @@ def run_r_engine(payload: dict[str, Any], r_script_path: Path | None = None) -> 
         "input_summary": {"keys": sorted(payload.keys())},
     }
     if not script.exists():
+        print(f"[DEBUG][R_ADAPTER] script missing: {script}")
         return {"status": "error", "errors": [f"R script nem található: {script}"], "warnings": [], "debug": debug}
     with tempfile.TemporaryDirectory(prefix="tdm_r_engine_") as td:
         in_path = Path(td) / "input.json"
@@ -86,22 +87,33 @@ def run_r_engine(payload: dict[str, Any], r_script_path: Path | None = None) -> 
         in_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         cmd = ["Rscript", str(script), str(in_path), str(out_path)]
         debug["command"] = cmd
+        print("[DEBUG][R_ADAPTER] script_path:", script)
+        print("[DEBUG][R_ADAPTER] command:", cmd)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
         except Exception as exc:
             debug["stderr"] = str(exc)
+            print("[DEBUG][R_ADAPTER] subprocess exception:", exc)
             return {"status": "error", "errors": [f"R futtatási hiba: {exc}"], "warnings": [], "debug": debug}
         debug["stdout"] = proc.stdout
         debug["stderr"] = proc.stderr
         debug["return_code"] = proc.returncode
+        print("[DEBUG][R_ADAPTER] return_code:", proc.returncode)
+        print("[DEBUG][R_ADAPTER] stdout:", proc.stdout)
+        print("[DEBUG][R_ADAPTER] stderr:", proc.stderr)
         if proc.returncode != 0:
             return {"status": "error", "errors": [f"R backend return code: {proc.returncode}"], "warnings": [], "debug": debug}
         if not out_path.exists():
             return {"status": "error", "errors": ["R backend nem készített output JSON-t."], "warnings": [], "debug": debug}
         try:
             data = json.loads(out_path.read_text(encoding="utf-8"))
+            print("[DEBUG][R_ADAPTER] parse_ok: True")
         except Exception as exc:
+            print("[DEBUG][R_ADAPTER] parse_ok: False", exc)
             return {"status": "error", "errors": [f"R output parse hiba: {exc}"], "warnings": [], "debug": debug}
         data.setdefault("debug", {})
         data["debug"]["adapter_debug"] = debug
+        print("[DEBUG][R_ADAPTER] output_status:", data.get("status"))
+        print("[DEBUG][R_ADAPTER] output_engine:", data.get("engine"))
+        print("[DEBUG][R_ADAPTER] output_model_key:", data.get("model_key"))
         return data

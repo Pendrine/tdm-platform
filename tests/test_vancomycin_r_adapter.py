@@ -70,3 +70,4 @@ def test_bayesian_engine_falls_back_without_crashing():
     # In CI env without Rscript, fallback still returns structured result.
     assert "warnings" in result
     assert "plot" in result
+    assert result["engine_source"] in {"R_BACKEND", "PYTHON_FALLBACK", "CLASSICAL_PYTHON"}

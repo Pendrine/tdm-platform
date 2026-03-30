@@ -128,7 +128,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def _modernize_vancomycin_ui(self) -> None:
         self._remove_empirical_controls_from_action_bar()
-        self._remove_method_controls_from_action_bar()
+        # Keep method selector visible so Bayesian/Klasszikus choice is explicit.
         if hasattr(self, "tabs"):
             for idx in reversed(range(self.tabs.count())):
                 if self.tabs.tabText(idx) == "Empirikus támogatás":
@@ -575,6 +575,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
             method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+            print(f"[DEBUG][UI] _run_model_selection_only method_combo={method}")
             res = self.calc_vancomycin(pk, method or "Auto")
             self.results = res
             self.latest_report = res["report"]
@@ -632,8 +633,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def reset_defaults(self):
         super().reset_defaults()
         self._set_default_sampling_datetimes()
-        if hasattr(self, "method_combo") and self.method_combo.findText("Klasszikus") >= 0:
-            self.method_combo.setCurrentText("Klasszikus")
+        if hasattr(self, "method_combo"):
+            if self.method_combo.findText("Auto") >= 0:
+                self.method_combo.setCurrentText("Auto")
+            elif self.method_combo.currentText().strip() == "" and self.method_combo.count() > 0:
+                self.method_combo.setCurrentIndex(0)
         if hasattr(self, "episode_events_table"):
             self.episode_events_table.setRowCount(0)
             self._append_episode_event("maintenance_dose")
@@ -643,7 +647,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._reset_non_vancomycin_views() if self.antibiotic_combo.currentText() != "Vancomycin" else None
 
     def collect_pk_inputs(self) -> dict:
-        return self.collect_common()
+        payload = self.collect_common()
+        payload["method"] = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+        print(f"[DEBUG][UI] collect_pk_inputs method={payload.get('method')}")
+        return payload
 
     def _collect_episode_events(self) -> list[dict]:
         events: list[dict] = []
@@ -880,6 +887,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
             method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+            print(f"[DEBUG][UI] calculate method_combo={method}")
             res = self.calc_vancomycin(pk, method or "Auto")
             self.results = res
             self.latest_report = res["report"]
@@ -1436,6 +1444,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         return
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:
+        print(f"[DEBUG][UI] calc_vancomycin input_method={method}")
         result = calculate_vancomycin(
             VancomycinInputs(
                 sex=str(pk["sex"]),

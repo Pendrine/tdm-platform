@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+def _default_r_script_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "r_pk_engine" / "run_engine.R"
+
+
+def build_r_input(inp: Any) -> dict[str, Any]:
+    return {
+        "patient": {
+            "id": inp.patient_id,
+            "name": inp.patient_name,
+            "sex": inp.sex,
+            "age": inp.age,
+            "weight_kg": inp.weight_kg,
+            "height_cm": inp.height_cm,
+            "scr_umol": inp.scr_umol,
+            "icu": inp.icu,
+            "hematology": inp.hematology,
+            "hsct": inp.hsct,
+            "unstable_renal": inp.unstable_renal,
+            "hemodialysis": inp.hemodialysis,
+        },
+        "mic": inp.mic,
+        "dose_number": inp.dose_number,
+        "selected_model_key": inp.selected_model_key,
+        "method": inp.method,
+        "episode_events": inp.episode_events or [],
+        "debug_enabled": True,
+    }
+
+
+def map_r_output_to_plot_payload(r_output: dict[str, Any]) -> dict[str, Any]:
+    curve = r_output.get("curve", {}) or {}
+    observed = r_output.get("observed", {}) or {}
+    pred_x = list(curve.get("x", []) or [])
+    pred_y = list(curve.get("y", []) or [])
+    obs_x = list(observed.get("x", []) or [])
+    obs_y = list(observed.get("y", []) or [])
+    return {
+        "title": "Vancomycin Bayesian (R backend)",
+        "single_model": {
+            "label": r_output.get("model_key", "bayesian_r"),
+            "pred_x": pred_x,
+            "pred_y": pred_y,
+            "obs_x": obs_x,
+            "obs_y": obs_y,
+            "dose_events": r_output.get("dose_events", []) or [],
+            "fit": {},
+        },
+        "model_averaging": {"overlays": []},
+        "current_x": pred_x,
+        "current_y": pred_y,
+        "best_x": pred_x,
+        "best_y": pred_y,
+        "obs_x": obs_x,
+        "obs_y": obs_y,
+        "dose_events": r_output.get("dose_events", []) or [],
+        "metadata": {"engine": "R_Bayesian", "debug": r_output.get("debug", {})},
+        "warnings": r_output.get("warnings", []) or [],
+        "errors": r_output.get("errors", []) or [],
+    }
+
+
+def run_r_engine(payload: dict[str, Any], r_script_path: Path | None = None) -> dict[str, Any]:
+    script = r_script_path or _default_r_script_path()
+    debug: dict[str, Any] = {
+        "script_path": str(script),
+        "command": [],
+        "stdout": "",
+        "stderr": "",
+        "return_code": None,
+        "input_summary": {"keys": sorted(payload.keys())},
+    }
+    if not script.exists():
+        return {"status": "error", "errors": [f"R script nem található: {script}"], "warnings": [], "debug": debug}
+    with tempfile.TemporaryDirectory(prefix="tdm_r_engine_") as td:
+        in_path = Path(td) / "input.json"
+        out_path = Path(td) / "output.json"
+        in_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        cmd = ["Rscript", str(script), str(in_path), str(out_path)]
+        debug["command"] = cmd
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception as exc:
+            debug["stderr"] = str(exc)
+            return {"status": "error", "errors": [f"R futtatási hiba: {exc}"], "warnings": [], "debug": debug}
+        debug["stdout"] = proc.stdout
+        debug["stderr"] = proc.stderr
+        debug["return_code"] = proc.returncode
+        if proc.returncode != 0:
+            return {"status": "error", "errors": [f"R backend return code: {proc.returncode}"], "warnings": [], "debug": debug}
+        if not out_path.exists():
+            return {"status": "error", "errors": ["R backend nem készített output JSON-t."], "warnings": [], "debug": debug}
+        try:
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"status": "error", "errors": [f"R output parse hiba: {exc}"], "warnings": [], "debug": debug}
+        data.setdefault("debug", {})
+        data["debug"]["adapter_debug"] = debug
+        return data

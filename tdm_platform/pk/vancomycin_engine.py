@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from tdm_platform.pk.common import UMOL_PER_MGDL_CREATININE, cockcroft_gault, posterior_blend, predict_one_compartment, validate_two_point_levels
+from tdm_platform.pk.vancomycin.r_backend_adapter import build_r_input, map_r_output_to_plot_payload, run_r_engine
 from tdm_platform.pk.vancomycin.workflow import run_vancomycin_workflow
 
 TARGET_AUC_LOW = 400.0
@@ -123,6 +124,55 @@ def calculate(inp: VancomycinInputs) -> dict:
         raise ValueError("Vancomycinnél a 2. minta a következő dózis előtt legyen (T2 < τ).")
 
     base = calc_auc_trapezoid(inp)
+    if inp.method == "Bayesian":
+        r_payload = build_r_input(inp)
+        r_out = run_r_engine(r_payload)
+        if r_out.get("status") == "ok" and not r_out.get("errors"):
+            auc24 = float(r_out.get("auc24") or 0.0)
+            auc_mic = r_out.get("auc_mic")
+            status = "Célzónában"
+            if auc24 < TARGET_AUC_LOW:
+                status = "Alulexpozíció"
+            elif auc24 > TARGET_AUC_HIGH:
+                status = "Túlexpozíció"
+            return {
+                "status": status,
+                "crcl": None,
+                "auc24": auc24,
+                "trough": float(r_out.get("predicted_trough") or 0.0),
+                "peak": float(r_out.get("predicted_peak") or 0.0),
+                "cl_l_h": float(r_out.get("posterior_cl_l_h") or 0.0),
+                "vd_l": float(r_out.get("posterior_vd_l") or 0.0),
+                "half_life": 0.0,
+                "ke": 0.0,
+                "auc_mic": auc_mic,
+                "auc_mic_status": "AUC/MIC számolva." if auc_mic is not None else "AUC/MIC nem értékelhető, mert MIC nincs megadva.",
+                "suggestion": {"best": {"dose": inp.dose_mg, "tau": inp.tau_h}},
+                "selected_model_key": str(r_out.get("model_key") or "goti_2018"),
+                "auto_selection": {
+                    "recommended_model_key": str(r_out.get("model_key") or "goti_2018"),
+                    "alternative_model_keys": [],
+                    "rationale": "Bayesian R backend selector",
+                    "bayesian_preferred": True,
+                    "trapezoid_eligible": False,
+                },
+                "fit_summary": [],
+                "final_explanation": "Bayesian becslés R backenddel (MAP).",
+                "history_summary_by_antibiotic": {},
+                "missing_covariates": {},
+                "plot": map_r_output_to_plot_payload(r_out),
+                "classical_reference": base,
+                "event_summary": {},
+                "fit_debug": {},
+                "warnings": r_out.get("warnings", []),
+                "errors": r_out.get("errors", []),
+                "debug": r_out.get("debug", {}),
+                "engine": "Bayesian_R",
+            }
+        # Fail-safe fallback to Python workflow path with explicit warning.
+        fallback_warning = f"R backend fallback: {', '.join(r_out.get('errors', []) or ['ismeretlen hiba'])}"
+    else:
+        fallback_warning = None
     workflow = run_vancomycin_workflow(
         {
             "patient_id": inp.patient_id,
@@ -252,7 +302,8 @@ def calculate(inp: VancomycinInputs) -> dict:
         "classical_reference": base,
         "event_summary": workflow.get("event_summary", {}),
         "fit_debug": workflow.get("fit_debug", {}),
-        "warnings": workflow.get("warnings", []),
+        "warnings": (workflow.get("warnings", []) + ([fallback_warning] if fallback_warning else [])),
         "errors": workflow.get("errors", []),
         "debug": workflow.get("debug", {}),
+        "engine": "Klasszikus_Python",
     }

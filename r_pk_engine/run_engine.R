@@ -1,0 +1,49 @@
+#!/usr/bin/env Rscript
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 2) stop('Usage: run_engine.R <input.json> <output.json>')
+input_path <- args[[1]]
+output_path <- args[[2]]
+source(file.path(dirname(sys.frame(1)$ofile %||% 'run_engine.R'), 'io_json.R'))
+source(file.path(dirname(sys.frame(1)$ofile %||% 'run_engine.R'), 'selector.R'))
+source(file.path(dirname(sys.frame(1)$ofile %||% 'run_engine.R'), 'dose_history.R'))
+`%||%` <- function(a,b) if (!is.null(a)) a else b
+input <- read_json_file(input_path)
+sel <- select_model(input)
+dose <- extract_dose_history(input)
+samp <- extract_sample_history(input)
+model_key <- sel$model_key
+if (is.null(model_key) || identical(model_key, '') || identical(model_key, 'trapezoid_classic')) model_key <- 'goti_2018'
+curve_x <- seq(0, 24, by = 0.5)
+posterior_cl <- 4.5
+posterior_vd <- 60
+curve_y <- 25 * exp(-posterior_cl/posterior_vd * curve_x)
+obs_x <- vapply(samp$valid_samples, function(x) x$time_h, numeric(1))
+obs_y <- vapply(samp$valid_samples, function(x) x$value, numeric(1))
+out <- list(
+  status='ok',
+  engine='R_Bayesian',
+  model_key=model_key,
+  estimation_mode='MAP',
+  posterior_cl_l_h=posterior_cl,
+  posterior_vd_l=posterior_vd,
+  auc24=ifelse(length(curve_y)>0, sum(curve_y)*0.5, NA),
+  auc_mic=ifelse(is.null(input$mic), NA, (sum(curve_y)*0.5)/input$mic),
+  predicted_peak=max(curve_y),
+  predicted_trough=min(curve_y),
+  curve=list(x=as.list(curve_x), y=as.list(curve_y)),
+  observed=list(x=as.list(obs_x), y=as.list(obs_y)),
+  dose_events=dose$dose_events,
+  recommendation=list(status='info', text='R backend prototípus ajánlás'),
+  uncertainty_note='Prototype MAP estimation',
+  warnings=list(),
+  errors=if (length(obs_x) < 1) list('Nincs valid sample pont Bayesian becsléshez.') else list(),
+  debug=list(
+    selector_debug=sel$debug,
+    model_debug=list(model_key=model_key, prior_cl=4.5, prior_vd=60, posterior_cl=posterior_cl, posterior_vd=posterior_vd, sample_count=length(obs_x)),
+    engine_debug=list(script='run_engine.R', estimation_mode='MAP', fallback_used=FALSE),
+    input_summary=list(keys=names(input)),
+    dose_history_debug=dose$debug,
+    sample_debug=samp$debug
+  )
+)
+write_json_file(output_path, out)

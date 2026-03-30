@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tdm_platform.pk.vancomycin.domain import AntibioticEpisode, AutoSelectionResult, WeightMetrics
-from tdm_platform.pk.vancomycin.model_library import MODELS
+from tdm_platform.pk.vancomycin.model_library import active_models
 
 
 def auto_select_model(
@@ -10,6 +10,8 @@ def auto_select_model(
     dose_number: int,
     has_previous_episode: bool,
 ) -> AutoSelectionResult:
+    models = active_models()
+    active_keys = {model.key for model in models}
     p = episode.patient
     rationale: list[str] = []
     if p.hemodialysis_flag:
@@ -25,14 +27,17 @@ def auto_select_model(
         recommended = "roberts_2011"
         rationale.append("ICU + instabil vese miatt kritikus állapotú modell preferált.")
     elif p.icu_flag:
-        recommended = "revilla_2010"
-        rationale.append("ICU flag alapján ICU-populációs modell került előre.")
+        recommended = "roberts_2011"
+        rationale.append("ICU flag alapján az aktív ICU modell (Roberts 2011) került előre.")
     elif weights.obesity_flag:
-        recommended = "adane_2015"
-        rationale.append("Obesity flag alapján obes modell előnyben.")
+        recommended = "goti_2018"
+        rationale.append("Obesity flag mellett csak aktív modellek használhatók, ezért Goti (2018) lett kiválasztva.")
     else:
         recommended = "goti_2018"
         rationale.append("Általános hospitalizált populáció: Goti (2018) alapértelmezett.")
+    if recommended not in active_keys:
+        recommended = "goti_2018"
+        rationale.append("A választott modell nem aktív, ezért fallback: Goti (2018).")
 
     bayesian_preferred = dose_number <= 2 or p.unstable_renal_flag or p.icu_flag
     trapezoid_eligible = dose_number >= 3 and not p.unstable_renal_flag
@@ -41,7 +46,7 @@ def auto_select_model(
     if not trapezoid_eligible:
         rationale.append("Klasszikus trapezoid csak stabilabb, későbbi mintavételnél javasolt.")
 
-    alternatives = tuple(model.key for model in MODELS if model.key != recommended)[:3]
+    alternatives = tuple(model.key for model in models if model.key != recommended)[:3]
     if has_previous_episode:
         rationale.append("Előző azonos antibiotikum-epizód elérhető, konzisztencia pont is számolható.")
 

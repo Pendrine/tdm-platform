@@ -140,6 +140,10 @@ def calculate(inp: VancomycinInputs) -> dict:
             auc_mic = r_out.get("auc_mic")
             plot_payload = map_r_output_to_plot_payload(r_out)
             has_plot = bool(plot_payload.get("current_x") or plot_payload.get("obs_x"))
+            print("[DEBUG][ENGINE] plot payload keys:", sorted(plot_payload.keys()))
+            print("[DEBUG][ENGINE] plot single_model label:", (plot_payload.get("single_model") or {}).get("label"))
+            print("[DEBUG][ENGINE] plot len(pred_y):", len((plot_payload.get("single_model") or {}).get("pred_y", []) or []))
+            print("[DEBUG][ENGINE] plot len(obs_y):", len((plot_payload.get("single_model") or {}).get("obs_y", []) or []))
             status = "Célzónában"
             if auc24 < TARGET_AUC_LOW:
                 status = "Alulexpozíció"
@@ -193,7 +197,7 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "warnings": r_out.get("warnings", []),
                 "errors": r_out.get("errors", []),
                 "debug": r_out.get("debug", {}),
-                "engine": "Bayesian_R",
+                "engine": str(r_out.get("engine") or "R_Bayesian"),
                 "engine_source": "R_BACKEND",
                 "used_r_backend": True,
                 "fallback_used": False,

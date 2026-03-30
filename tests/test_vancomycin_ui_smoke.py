@@ -29,3 +29,25 @@ def test_result_contains_single_and_model_averaging_data_for_ui():
     # UI integration smoke: auto-select and ranking block data exists.
     assert result["auto_selection"]["rationale"]
     assert result["fit_summary"]
+
+
+def test_classical_mode_forces_trapezoid_classic_selection():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=63,
+            weight_kg=86,
+            height_cm=178,
+            scr_umol=110,
+            dose_mg=1250,
+            tau_h=12,
+            tinf_h=1.5,
+            c1=26,
+            t1_start_h=2,
+            c2=14,
+            t2_start_h=10,
+            method="Klasszikus",
+            selected_model_key="goti_2018",
+        )
+    )
+    assert result["selected_model_key"] == "trapezoid_classic"

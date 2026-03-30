@@ -55,7 +55,7 @@ from tdm_platform.core.permissions import is_primary_moderator
 from tdm_platform.pk.amikacin_engine import calculate as calculate_amikacin
 from tdm_platform.pk.linezolid_engine import calculate as calculate_linezolid
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate as calculate_vancomycin
-from tdm_platform.pk.vancomycin.model_library import MODELS
+from tdm_platform.pk.vancomycin.model_library import MODELS, active_models
 from tdm_platform.services.pdf_service import render_simple_report_pdf
 from tdm_platform.services.smtp_service import SMTPSettingsStore, get_smtp_settings
 from tdm_platform.storage.paths import (
@@ -489,10 +489,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         right_layout.addLayout(cards_grid)
         self.auto_select_browser = QTextBrowser()
         self.model_override_combo = QComboBox()
-        self.model_override_combo.addItem("Automatikus javaslat", "")
-        self.model_override_combo.addItem("Klasszikus trapezoid (steady-state)", "trapezoid_classic")
-        for model in MODELS:
-            self.model_override_combo.addItem(model.label, model.key)
+        self._refresh_model_override_options("Bayesian")
         self.model_override_combo.currentIndexChanged.connect(self._on_manual_model_override_changed)
         self.final_decision_browser = QTextBrowser()
         self.model_meta_browser = QTextBrowser()
@@ -574,13 +571,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
             abx = self.antibiotic_combo.currentText()
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
-            method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+            method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
+            self._refresh_model_override_options(method)
             print(f"[DEBUG][UI] _run_model_selection_only method_combo={method}")
-            res = self.calc_vancomycin(pk, method or "Auto")
+            res = self.calc_vancomycin(pk, method or "Bayesian")
             self.results = res
             self.latest_report = res["report"]
             self.result_text.setPlainText(res["report"])
-            self.card_primary.update_card(res["primary"], f"{abx} – Auto")
+            self.card_primary.update_card(res["primary"], f"{abx} – {method}")
             self.card_secondary.update_card(res["secondary"], res.get("status_sub", ""))
             self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
             self.card_status.update_card(res["status"], res.get("status_sub", ""))
@@ -596,6 +594,25 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         self._run_model_selection_only()
 
+    def _refresh_model_override_options(self, method: str) -> None:
+        if not hasattr(self, "model_override_combo"):
+            return
+        combo = self.model_override_combo
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            method_norm = str(method or "").strip()
+            if method_norm == "Klasszikus":
+                combo.addItem("Klasszikus trapezoid (steady-state)", "trapezoid_classic")
+            else:
+                combo.addItem("Automatikus javaslat", "")
+                for model in active_models():
+                    combo.addItem(model.label, model.key)
+            if combo.count() > 0:
+                combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(False)
+
     def methods_for_antibiotic(self, abx: str) -> list[str]:
         if abx == "Vancomycin":
             return ["Klasszikus", "Bayesian"]
@@ -604,6 +621,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def on_antibiotic_change(self):
         super().on_antibiotic_change()
         is_vanco = self.antibiotic_combo.currentText() == "Vancomycin"
+        if is_vanco and hasattr(self, "method_combo"):
+            self._refresh_model_override_options(self.method_combo.currentText())
         self._set_default_sampling_datetimes()
         if hasattr(self, "model_fit_btn"):
             self.model_fit_btn.setVisible(is_vanco)
@@ -634,10 +653,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
         super().reset_defaults()
         self._set_default_sampling_datetimes()
         if hasattr(self, "method_combo"):
-            if self.method_combo.findText("Auto") >= 0:
-                self.method_combo.setCurrentText("Auto")
+            if self.method_combo.findText("Bayesian") >= 0:
+                self.method_combo.setCurrentText("Bayesian")
             elif self.method_combo.currentText().strip() == "" and self.method_combo.count() > 0:
                 self.method_combo.setCurrentIndex(0)
+            self._refresh_model_override_options(self.method_combo.currentText())
         if hasattr(self, "episode_events_table"):
             self.episode_events_table.setRowCount(0)
             self._append_episode_event("maintenance_dose")
@@ -648,7 +668,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def collect_pk_inputs(self) -> dict:
         payload = self.collect_common()
-        payload["method"] = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+        payload["method"] = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
         print(f"[DEBUG][UI] collect_pk_inputs method={payload.get('method')}")
         return payload
 
@@ -895,13 +915,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 return
             pk = self.collect_pk_inputs()
             self._last_pk_payload = pk
-            method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Auto"
+            method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
+            self._refresh_model_override_options(method)
             print(f"[DEBUG][UI] calculate method_combo={method}")
-            res = self.calc_vancomycin(pk, method or "Auto")
+            res = self.calc_vancomycin(pk, method or "Bayesian")
             self.results = res
             self.latest_report = res["report"]
             self.result_text.setPlainText(res["report"])
-            self.card_primary.update_card(res["primary"], f"{abx} – Auto")
+            self.card_primary.update_card(res["primary"], f"{abx} – {method}")
             self.card_secondary.update_card(res["secondary"], res.get("status_sub", ""))
             self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
             self.card_status.update_card(res["status"], res.get("status_sub", ""))
@@ -917,6 +938,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         abx = self.antibiotic_combo.currentText()
         method = self.method_combo.currentText()
+        if abx == "Vancomycin":
+            self._refresh_model_override_options(method)
         if hasattr(self, "guide_browser"):
             self.guide_browser.setHtml(self.build_guide_html(abx, method))
         if hasattr(self, "evidence_browser"):
@@ -926,7 +949,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if abx != "Vancomycin":
             return "<h2>Info</h2><p>Ehhez az antibiotikumhoz még nincs modell implementálva.</p>"
         items = []
-        for model in MODELS:
+        for model in active_models():
             flags = ", ".join(model.required_covariates)
             items.append(
                 f"<li><b>{model.label}</b><br>"
@@ -941,7 +964,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if abx != "Vancomycin":
             return "<h2>Citációk</h2><p>Ehhez az antibiotikumhoz még nincs modell-specifikus citáció.</p>"
         parts = ["<h2>Bayesian/populációs modellek</h2>"]
-        for model in MODELS:
+        for model in active_models():
             parts.append(
                 f"<p><b>{model.label}</b><br>"
                 f"Szerző/év: {model.author} ({model.year})<br>"
@@ -1325,6 +1348,15 @@ class MainWindow(legacy_ui.TDMMainWindow):
         avg = spec.get("model_averaging") or {}
         errors = spec.get("errors", []) or []
         warnings = spec.get("warnings", []) or []
+        pred_x = list(single.get("pred_x") or spec.get("current_x", []) or [])
+        pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
+        obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
+        obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
+        dose_events = list(single.get("dose_events") or spec.get("dose_events", []) or [])
+        single_label = str(single.get("label") or "Single model")
+        print("[DEBUG][PLOT] single_model label:", single_label)
+        print("[DEBUG][PLOT] len(pred_y):", len(pred_y))
+        print("[DEBUG][PLOT] len(obs_y):", len(obs_y))
         if single and not errors:
             fig = go.Figure()
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
@@ -1340,12 +1372,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
                             opacity=0.6,
                         )
                     )
-            if (not show_averaging) and (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()):
-                fig.add_trace(go.Scatter(x=single["pred_x"], y=single["pred_y"], mode="lines", name=f"Single: {single['label']}"))
+            if (not show_averaging) and (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()) and pred_x and pred_y:
+                fig.add_trace(go.Scatter(x=pred_x, y=pred_y, mode="lines", name=f"Single: {single_label}"))
             if not hasattr(self, "toggle_obs") or self.toggle_obs.isChecked():
-                fig.add_trace(go.Scatter(x=single["obs_x"], y=single["obs_y"], mode="markers", name="Observed", marker=dict(size=10, color="green")))
-            if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and single.get("dose_events"):
-                for event in single.get("dose_events", []):
+                if obs_x and obs_y:
+                    fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Observed", marker=dict(size=10, color="green")))
+            if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
+                for event in dose_events:
                     fig.add_vline(x=float(event.get("time", 0.0)), line_dash="dash", line_color="gray")
             fig.update_layout(
                 title=f"{spec.get('title', 'Vancomycin')} — Single model + Model averaging",
@@ -1354,39 +1387,64 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 template="plotly_white",
                 margin=dict(l=30, r=30, t=50, b=30),
             )
-            html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
-            if isinstance(getattr(self, "viz_plot_view", None), QTextBrowser) and MATPLOTLIB_UI_OK:
-                try:
-                    mfig = plt.figure(figsize=(8, 4), dpi=120)
-                    ax = mfig.add_subplot(111)
-                    if single.get("pred_x") and single.get("pred_y"):
-                        ax.plot(single["pred_x"], single["pred_y"], label=single.get("label", "Model"), linewidth=2.0, color="#2563eb")
-                    if single.get("obs_x") and single.get("obs_y"):
-                        ax.scatter(single["obs_x"], single["obs_y"], label="Observed", color="#16a34a")
-                    ax.set_xlabel("Óra")
-                    ax.set_ylabel("Koncentráció (mg/L)")
-                    ax.set_title(spec.get("title", "Vancomycin"))
-                    ax.grid(True, alpha=0.3)
-                    ax.legend(loc="best")
-                    buffer = BytesIO()
-                    mfig.tight_layout()
-                    mfig.savefig(buffer, format="png")
-                    plt.close(mfig)
-                    png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-                    html = (
-                        f"<h3>{spec.get('title', 'Vancomycin')}</h3>"
-                        f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%; height:auto;'/>"
-                    )
-                except Exception:
-                    pass
-            if hasattr(self, "viz_plot_view"):
-                self.viz_plot_view.setHtml(html)
+            widget = getattr(self, "viz_plot_view", None)
+            print("[DEBUG][PLOT] render widget:", type(widget).__name__ if widget is not None else "None")
+            if isinstance(widget, QTextBrowser):
+                print("[DEBUG][PLOT] render branch: text_browser")
+                html = ""
+                if MATPLOTLIB_UI_OK and (pred_x and pred_y or obs_x and obs_y):
+                    try:
+                        mfig = plt.figure(figsize=(8, 4), dpi=120)
+                        ax = mfig.add_subplot(111)
+                        if pred_x and pred_y:
+                            ax.plot(pred_x, pred_y, label=single_label, linewidth=2.0, color="#2563eb")
+                        if obs_x and obs_y:
+                            ax.scatter(obs_x, obs_y, label="Observed", color="#16a34a")
+                        for event in dose_events:
+                            ax.axvline(float(event.get("time", 0.0)), linestyle="--", color="gray", alpha=0.6)
+                        ax.set_xlabel("Óra")
+                        ax.set_ylabel("Koncentráció (mg/L)")
+                        ax.set_title(spec.get("title", "Vancomycin"))
+                        ax.grid(True, alpha=0.3)
+                        ax.legend(loc="best")
+                        buffer = BytesIO()
+                        mfig.tight_layout()
+                        mfig.savefig(buffer, format="png")
+                        plt.close(mfig)
+                        png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                        html = (
+                            f"<h3>{spec.get('title', 'Vancomycin')}</h3>"
+                            f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%; height:auto;'/>"
+                        )
+                        print("[DEBUG][PLOT] render branch: matplotlib_png")
+                    except Exception as exc:
+                        print("[DEBUG][PLOT] render branch: matplotlib_png_failed", exc)
+                if not html:
+                    print("[DEBUG][PLOT] render branch: text_fallback")
+                    lines = [f"<h3>{spec.get('title', 'Vancomycin')}</h3>"]
+                    if obs_x and obs_y:
+                        lines.append("<p><b>Observed pontok:</b></p><ul>" + "".join(f"<li>t={x}h, C={y} mg/L</li>" for x, y in zip(obs_x, obs_y)) + "</ul>")
+                    if dose_events:
+                        lines.append(
+                            "<p><b>Dózisesemények:</b></p><ul>"
+                            + "".join(f"<li>{str(e.get('event_type','dose'))}: t={e.get('time', 0)}h, dose={e.get('dose', '-')}</li>" for e in dose_events)
+                            + "</ul>"
+                        )
+                    if pred_y:
+                        lines.append(f"<p>Fitted pontok száma: {len(pred_y)}</p>")
+                    html = "".join(lines)
+                widget.setHtml(html)
+            else:
+                print("[DEBUG][PLOT] render branch: plotly_html")
+                html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
+                if hasattr(self, "viz_plot_view"):
+                    self.viz_plot_view.setHtml(html)
             if hasattr(self, "viz_single"):
                 fit = single.get("fit", {})
                 rmse = fit.get("rmse")
                 mae = fit.get("mae")
                 self.viz_single.setHtml(
-                    f"<h3>{single.get('label','Single model')}</h3><p>RMSE: {rmse if rmse is not None else '-'} | MAE: {mae if mae is not None else '-'}</p>"
+                    f"<h3>{single_label}</h3><p>RMSE: {rmse if rmse is not None else '-'} | MAE: {mae if mae is not None else '-'}</p>"
                 )
             if hasattr(self, "viz_averaging"):
                 self.viz_averaging.setHtml(
@@ -1421,6 +1479,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if not fallback_dose_events:
             fallback_dose_events = spec.get("dose_events", []) or []
         if (fallback_pred_x and fallback_pred_y) or (fallback_obs_x and fallback_obs_y):
+            print("[DEBUG][PLOT] render branch: fallback_plotly")
             fig = go.Figure()
             if fallback_pred_x and fallback_pred_y:
                 fig.add_trace(go.Scatter(x=fallback_pred_x, y=fallback_pred_y, mode="lines", name="Fitted/legacy"))
@@ -1433,6 +1492,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if hasattr(self, "viz_plot_view"):
                 self.viz_plot_view.setHtml(html)
         lines = ["<h3>Nincs megjeleníthető modellillesztési eredmény</h3>"]
+        print("[DEBUG][PLOT] render branch: fallback_text")
         if fallback_obs_x and fallback_obs_y:
             obs_rows = "".join(f"<li>t={x}h, C={y} mg/L</li>" for x, y in zip(fallback_obs_x, fallback_obs_y))
             lines.append(f"<p><b>Observed pontok:</b></p><ul>{obs_rows}</ul>")
@@ -1454,6 +1514,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:
         print(f"[DEBUG][UI] calc_vancomycin input_method={method}")
+        selected_model_key = (self.model_override_combo.currentData() if hasattr(self, "model_override_combo") else None) or None
+        if method == "Klasszikus":
+            selected_model_key = "trapezoid_classic"
         result = calculate_vancomycin(
             VancomycinInputs(
                 sex=str(pk["sex"]),
@@ -1479,7 +1542,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 method=method,
                 height_cm=float(pk.get("height", 170.0)),
                 dose_number=int(pk.get("dose_number", 1)),
-                selected_model_key=(self.model_override_combo.currentData() if hasattr(self, "model_override_combo") else None) or None,
+                selected_model_key=selected_model_key,
                 history_rows=self.history_data,
                 episode_events=pk.get("episode_events", []),
             )

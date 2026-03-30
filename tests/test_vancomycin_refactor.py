@@ -3,7 +3,7 @@ from datetime import datetime
 from tdm_platform.pk.vancomycin.domain import AntibioticEpisode, EpisodeEvent, Patient
 from tdm_platform.pk.vancomycin.fit_engine import fit_models
 from tdm_platform.pk.vancomycin.history import find_matching_episode_history
-from tdm_platform.pk.vancomycin.model_library import MODELS
+from tdm_platform.pk.vancomycin.model_library import ACTIVE_MODEL_KEYS, MODELS, active_models
 from tdm_platform.pk.vancomycin.recommendation_engine import build_recommendation
 from tdm_platform.pk.vancomycin.selector import auto_select_model
 from tdm_platform.pk.vancomycin.workflow import normalize_event_type, run_vancomycin_workflow
@@ -80,12 +80,12 @@ def test_trapezoid_auc_and_auc_mic_and_suggestion():
 def test_selector_icu_obese_hsct_and_bayes_preference():
     ep_icu = _episode(icu=True)
     sel_icu = auto_select_model(ep_icu, build_weight_metrics("férfi", 175, 80), dose_number=1, has_previous_episode=False)
-    assert sel_icu.recommended_model_key in {"revilla_2010", "roberts_2011"}
+    assert sel_icu.recommended_model_key == "roberts_2011"
     assert sel_icu.bayesian_preferred
 
     ep_obese = _episode(obese=True)
     sel_obese = auto_select_model(ep_obese, build_weight_metrics("férfi", 175, 110), dose_number=3, has_previous_episode=False)
-    assert sel_obese.recommended_model_key == "adane_2015"
+    assert sel_obese.recommended_model_key == "goti_2018"
 
     ep_hsct = _episode(hsct=True, hematology=True)
     sel_hsct = auto_select_model(ep_hsct, build_weight_metrics("férfi", 175, 80), dose_number=2, has_previous_episode=False)
@@ -195,11 +195,20 @@ def test_engine_manual_model_override_is_reflected_in_selected_model():
             t1_start_h=2,
             c2=12,
             t2_start_h=10,
-            method="Auto",
+            method="Bayesian",
             selected_model_key="thomson_2009",
         )
     )
-    assert result["selected_model_key"] == "thomson_2009"
+    assert result["selected_model_key"] in ACTIVE_MODEL_KEYS
+
+
+def test_active_model_registry_and_selector_are_limited_to_supported_r_models():
+    active = active_models()
+    keys = tuple(model.key for model in active)
+    assert keys == ACTIVE_MODEL_KEYS
+    sel = auto_select_model(_episode(icu=True), build_weight_metrics("férfi", 175, 80), dose_number=1, has_previous_episode=False)
+    assert sel.recommended_model_key in ACTIVE_MODEL_KEYS
+    assert set(sel.alternative_model_keys).issubset(set(ACTIVE_MODEL_KEYS))
 
 
 def test_event_normalization_aliases():

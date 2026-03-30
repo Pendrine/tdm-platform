@@ -62,6 +62,7 @@ class ModelMetadata:
     weight_strategy_vd: str
     dialysis_warning: str | None = None
     optional_covariates: tuple[str, ...] = ()
+    status: str = "active"
 
 
 @dataclass(frozen=True)
@@ -104,4 +105,3 @@ class Recommendation:
     toxicity_risk: str
     auc_mic_assessment: str
     text: str
-

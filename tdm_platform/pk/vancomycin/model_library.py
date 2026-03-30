@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from tdm_platform.pk.vancomycin.domain import ModelMetadata
 
+ACTIVE_MODEL_KEYS: tuple[str, ...] = ("goti_2018", "roberts_2011", "okada_2018")
+
 
 MODELS: tuple[ModelMetadata, ...] = (
     ModelMetadata(
@@ -16,6 +18,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_crcl="adjbw",
         weight_strategy_vd="tbw",
         optional_covariates=("unstable_renal_flag",),
+        status="active",
     ),
     ModelMetadata(
         key="thomson_2009",
@@ -29,6 +32,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_crcl="tbw",
         weight_strategy_vd="tbw",
         optional_covariates=("unstable_renal_flag",),
+        status="experimental",
     ),
     ModelMetadata(
         key="adane_2015",
@@ -42,6 +46,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_crcl="adjbw",
         weight_strategy_vd="adjbw",
         optional_covariates=("obesity_flag",),
+        status="experimental",
     ),
     ModelMetadata(
         key="revilla_2010",
@@ -55,6 +60,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_crcl="adjbw",
         weight_strategy_vd="tbw",
         optional_covariates=("unstable_renal_flag",),
+        status="experimental",
     ),
     ModelMetadata(
         key="roberts_2011",
@@ -68,6 +74,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_crcl="adjbw",
         weight_strategy_vd="tbw",
         optional_covariates=("unstable_renal_flag",),
+        status="active",
     ),
     ModelMetadata(
         key="mangin_2014",
@@ -81,6 +88,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_crcl="adjbw",
         weight_strategy_vd="tbw",
         optional_covariates=("unstable_renal_flag",),
+        status="experimental",
     ),
     ModelMetadata(
         key="okada_2018",
@@ -95,6 +103,7 @@ MODELS: tuple[ModelMetadata, ...] = (
         weight_strategy_vd="tbw",
         dialysis_warning="Hemodialysis esetén külön modell / manuális felülvizsgálat szükséges.",
         optional_covariates=("hemodialysis_flag", "rass_score", "saspi_score"),
+        status="active",
     ),
 )
 
@@ -102,3 +111,6 @@ MODELS: tuple[ModelMetadata, ...] = (
 def get_model(model_key: str) -> ModelMetadata:
     return next(model for model in MODELS if model.key == model_key)
 
+
+def active_models() -> tuple[ModelMetadata, ...]:
+    return tuple(model for model in MODELS if model.key in ACTIVE_MODEL_KEYS and model.status == "active")

@@ -8,6 +8,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from tdm_platform.pk.vancomycin.model_library import get_model
+
 
 def _default_r_script_path() -> Path:
     return Path(__file__).resolve().parents[3] / "r_pk_engine" / "run_engine.R"
@@ -66,10 +68,15 @@ def map_r_output_to_plot_payload(r_output: dict[str, Any]) -> dict[str, Any]:
     pred_y = list(curve.get("y", []) or [])
     obs_x = list(observed.get("x", []) or [])
     obs_y = list(observed.get("y", []) or [])
+    model_key = str(r_output.get("model_key", "bayesian_r"))
+    try:
+        model_label = get_model(model_key).label
+    except StopIteration:
+        model_label = model_key
     return {
         "title": "Vancomycin Bayesian (R backend)",
         "single_model": {
-            "label": r_output.get("model_key", "bayesian_r"),
+            "label": model_label,
             "pred_x": pred_x,
             "pred_y": pred_y,
             "obs_x": obs_x,

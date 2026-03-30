@@ -8,7 +8,7 @@ from tdm_platform.pk.vancomycin.domain import AntibioticEpisode, EpisodeEvent, P
 from tdm_platform.pk.vancomycin.final_ranker import rank_final_model
 from tdm_platform.pk.vancomycin.fit_engine import fit_models_with_debug
 from tdm_platform.core.episode_history import find_patient_episodes, summarize_episodes_by_antibiotic
-from tdm_platform.pk.vancomycin.model_library import MODELS, get_model
+from tdm_platform.pk.vancomycin.model_library import active_models, get_model
 from tdm_platform.pk.vancomycin.model_validation import filter_models_by_available_covariates
 from tdm_platform.pk.vancomycin.recommendation_engine import build_recommendation
 from tdm_platform.pk.vancomycin.selector import auto_select_model
@@ -188,10 +188,15 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
         antibiotic=None,
     )
     dose_number = int(payload.get("dose_number", 3))
+    models_for_selection = active_models()
+    active_model_keys = {model.key for model in models_for_selection}
     selection = auto_select_model(episode, weights, dose_number=dose_number, has_previous_episode=bool(previous))
     raw_selected_model = payload.get("selected_model_key")
     manual_model_key = str(raw_selected_model).strip() if raw_selected_model is not None else None
     if manual_model_key in {"", "None", "null"}:
+        manual_model_key = None
+    if manual_model_key and manual_model_key not in active_model_keys and manual_model_key != "trapezoid_classic":
+        warnings.append(f"A kiválasztott modell nem aktív: {manual_model_key}; aktív modellkészlet használata.")
         manual_model_key = None
     if manual_model_key and manual_model_key != "trapezoid_classic":
         selection = replace(
@@ -212,10 +217,10 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
         if key:
             consistency_bonus[key] = max(consistency_bonus.get(key, 0.4), 0.9)
 
-    eligible_models, missing_covariates = filter_models_by_available_covariates(MODELS, episode, weights)
+    eligible_models, missing_covariates = filter_models_by_available_covariates(models_for_selection, episode, weights)
     fit_result = fit_models_with_debug(
         episode,
-        eligible_models or MODELS,
+        eligible_models or models_for_selection,
         weights,
         mic=payload.get("mic"),
         prior_bonus=prior_bonus,

@@ -6,6 +6,7 @@ from tdm_platform.pk.vancomycin.history import find_matching_episode_history
 from tdm_platform.pk.vancomycin.model_library import MODELS
 from tdm_platform.pk.vancomycin.recommendation_engine import build_recommendation
 from tdm_platform.pk.vancomycin.selector import auto_select_model
+from tdm_platform.pk.vancomycin.workflow import normalize_event_type, run_vancomycin_workflow
 from tdm_platform.pk.vancomycin.weights import build_weight_metrics, crcl_from_metrics
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calc_auc_trapezoid, calculate
 
@@ -199,3 +200,89 @@ def test_engine_manual_model_override_is_reflected_in_selected_model():
         )
     )
     assert result["selected_model_key"] == "thomson_2009"
+
+
+def test_event_normalization_aliases():
+    assert normalize_event_type("Sample") == "sample"
+    assert normalize_event_type("trough_level") == "sample"
+    assert normalize_event_type("loading dose") == "loading_dose"
+    assert normalize_event_type("maintenance") == "maintenance_dose"
+    assert normalize_event_type("supplemental_dose") == "extra_dose"
+    assert normalize_event_type("scr") == "creatinine"
+
+
+def test_workflow_loading_maintenance_extra_summary_and_plot():
+    payload = {
+        "sex": "férfi",
+        "age": 60,
+        "height_cm": 175,
+        "weight_kg": 80,
+        "scr_umol": 100,
+        "dose_mg": 1000,
+        "tau_h": 12,
+        "tinf_h": 1,
+        "c1": 24,
+        "t1_h": 2,
+        "c2": 12,
+        "t2_h": 10,
+        "episode_events": [
+            {"event_type": "loading dose", "time_h": -12, "dose_mg": 1500, "tinf_h": 2},
+            {"event_type": "maintenance", "time_h": 0, "dose_mg": 1000, "tinf_h": 1, "tau_h": 12},
+            {"event_type": "extra_dose", "time_h": 6, "dose_mg": 250, "tinf_h": 1},
+            {"event_type": "sample", "time_h": 2, "level_mg_l": 24},
+            {"event_type": "sample", "time_h": 10, "level_mg_l": 12},
+        ],
+    }
+    result = run_vancomycin_workflow(payload, history_rows=[])
+    assert result["event_summary"]["loading_dose_present"]
+    assert result["event_summary"]["maintenance_dose_count"] >= 1
+    assert result["event_summary"]["extra_dose_count"] >= 1
+    assert len(result["plot"]["single_model"]["dose_events"]) >= 2
+
+
+def test_workflow_insufficient_samples_returns_structured_error():
+    payload = {
+        "sex": "férfi",
+        "age": 60,
+        "height_cm": 175,
+        "weight_kg": 80,
+        "scr_umol": 100,
+        "dose_mg": 1000,
+        "tau_h": 12,
+        "tinf_h": 1,
+        "c1": 20,
+        "t1_h": 2,
+        "c2": 10,
+        "t2_h": 10,
+        "episode_events": [
+            {"event_type": "maintenance_dose", "time_h": 0, "dose_mg": 1000, "tinf_h": 1},
+            {"event_type": "sample", "time_h": 2, "level_mg_l": 20},
+        ],
+    }
+    result = run_vancomycin_workflow(payload, history_rows=[])
+    assert result["errors"]
+    assert "legalább két érvényes mérési pont" in result["errors"][0]
+    assert result["plot"]["errors"]
+
+
+def test_engine_missing_mic_has_explicit_auc_mic_status():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            mic=None,
+            method="Bayesian",
+        )
+    )
+    assert result["auc24"] > 0
+    assert result["auc_mic"] is None
+    assert "MIC nincs megadva" in result["auc_mic_status"]

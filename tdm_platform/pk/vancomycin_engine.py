@@ -156,10 +156,18 @@ def calculate(inp: VancomycinInputs) -> dict:
         },
         history_rows=inp.history_rows or [],
     )
+    if workflow.get("errors") and not workflow.get("best"):
+        raise ValueError(workflow["errors"][0])
     best = workflow["best"]
     auto = workflow["auto_selection"]
     classical_forced = inp.selected_model_key == "trapezoid_classic" or inp.method == "Klasszikus"
-    classical_auto = False
+    classical_auto = (
+        inp.method == "Auto"
+        and not inp.selected_model_key
+        and auto.trapezoid_eligible
+        and not auto.bayesian_preferred
+        and int(inp.dose_number or 0) >= 2
+    )
     use_classical = classical_forced or classical_auto
     if use_classical:
         cl_used = base["cl_l_h"]
@@ -212,6 +220,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         status = "Túlexpozíció"
 
     auc_mic = None if inp.mic is None else pred_auc24 / inp.mic
+    auc_mic_status = "AUC/MIC nem értékelhető, mert MIC nincs megadva." if inp.mic is None else "AUC/MIC számolva."
     suggestion = suggest_regimen(cl_used, vd_used, inp.target_auc, crcl, inp.rounding_mg)
 
     vd_prior = inp.weight_kg * (0.7 if inp.method == "Bayesian" else 0.9)
@@ -231,6 +240,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         "half_life": pred_half_life,
         "ke": pred_ke,
         "auc_mic": auc_mic,
+        "auc_mic_status": auc_mic_status,
         "suggestion": suggestion,
         "selected_model_key": selected_model_key,
         "auto_selection": auto_selection,
@@ -240,4 +250,9 @@ def calculate(inp: VancomycinInputs) -> dict:
         "missing_covariates": missing_covariates,
         "plot": workflow.get("plot"),
         "classical_reference": base,
+        "event_summary": workflow.get("event_summary", {}),
+        "fit_debug": workflow.get("fit_debug", {}),
+        "warnings": workflow.get("warnings", []),
+        "errors": workflow.get("errors", []),
+        "debug": workflow.get("debug", {}),
     }

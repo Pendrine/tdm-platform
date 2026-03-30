@@ -7,9 +7,27 @@ from tdm_platform.pk.vancomycin.model_library import get_model
 def build_plot_payload(
     observation_times: tuple[float, ...],
     observation_values: tuple[float, ...],
-    final_decision: FinalModelDecision,
+    final_decision: FinalModelDecision | None,
     dose_events: tuple[EpisodeEvent, ...],
+    metadata: dict | None = None,
+    warnings: list[str] | None = None,
+    errors: list[str] | None = None,
 ) -> dict:
+    if final_decision is None:
+        return {
+            "title": "Vancomycin model fit",
+            "single_model": None,
+            "model_averaging": {"overlays": []},
+            "current_x": list(observation_times),
+            "current_y": [],
+            "best_x": list(observation_times),
+            "best_y": [],
+            "obs_x": list(observation_times),
+            "obs_y": list(observation_values),
+            "metadata": metadata or {},
+            "warnings": warnings or [],
+            "errors": errors or ["Nincs elérhető végső modell döntés."],
+        }
     single = final_decision.ranking[0]
     overlays = []
     for fit in final_decision.ranking[:4]:
@@ -58,4 +76,7 @@ def build_plot_payload(
         "best_y": list(final_decision.ranking[1].predicted_concentrations if len(final_decision.ranking) > 1 else single.predicted_concentrations),
         "obs_x": list(observation_times),
         "obs_y": list(observation_values),
+        "metadata": metadata or {},
+        "warnings": warnings or [],
+        "errors": errors or [],
     }

@@ -1394,9 +1394,25 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         fallback_obs_x = spec.get("obs_x", []) or []
         fallback_obs_y = spec.get("obs_y", []) or []
+        fallback_pred_x = spec.get("current_x", []) or []
+        fallback_pred_y = spec.get("current_y", []) or []
         fallback_dose_events = []
         if isinstance(single, dict):
             fallback_dose_events = single.get("dose_events", []) or []
+        if not fallback_dose_events:
+            fallback_dose_events = spec.get("dose_events", []) or []
+        if (fallback_pred_x and fallback_pred_y) or (fallback_obs_x and fallback_obs_y):
+            fig = go.Figure()
+            if fallback_pred_x and fallback_pred_y:
+                fig.add_trace(go.Scatter(x=fallback_pred_x, y=fallback_pred_y, mode="lines", name="Fitted/legacy"))
+            if fallback_obs_x and fallback_obs_y:
+                fig.add_trace(go.Scatter(x=fallback_obs_x, y=fallback_obs_y, mode="markers", name="Observed", marker=dict(size=10, color="green")))
+            for event in fallback_dose_events:
+                fig.add_vline(x=float(event.get("time", 0.0)), line_dash="dash", line_color="gray")
+            fig.update_layout(title=spec.get("title", "Vancomycin plot"), xaxis_title="Óra", yaxis_title="Koncentráció (mg/L)", template="plotly_white")
+            html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
+            if hasattr(self, "viz_plot_view"):
+                self.viz_plot_view.setHtml(html)
         lines = ["<h3>Nincs megjeleníthető modellillesztési eredmény</h3>"]
         if fallback_obs_x and fallback_obs_y:
             obs_rows = "".join(f"<li>t={x}h, C={y} mg/L</li>" for x, y in zip(fallback_obs_x, fallback_obs_y))
@@ -1531,6 +1547,15 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         }
                     ]
                 },
+                "current_x": obs_x,
+                "current_y": obs_y,
+                "best_x": obs_x,
+                "best_y": obs_y,
+                "obs_x": obs_x,
+                "obs_y": obs_y,
+                "metadata": {"mode": "trapezoid_classic"},
+                "warnings": result.get("warnings", []),
+                "errors": result.get("errors", []),
             }
 
         ui_result = {

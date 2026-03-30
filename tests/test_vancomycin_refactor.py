@@ -271,6 +271,7 @@ def test_workflow_insufficient_samples_returns_structured_error():
     assert "legalább két érvényes mérési pont" in result["errors"][0]
     assert result["plot"]["errors"]
     assert result["plot"]["obs_y"]
+    assert "dose_events" in result["plot"]
 
 
 def test_engine_missing_mic_has_explicit_auc_mic_status():
@@ -294,3 +295,25 @@ def test_engine_missing_mic_has_explicit_auc_mic_status():
     assert result["auc24"] > 0
     assert result["auc_mic"] is None
     assert "MIC nincs megadva" in result["auc_mic_status"]
+
+
+def test_classical_path_plot_payload_keeps_legacy_keys():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+        )
+    )
+    plot = result["plot"]
+    for key in ["title", "single_model", "model_averaging", "current_x", "current_y", "best_x", "best_y", "obs_x", "obs_y", "metadata", "warnings", "errors"]:
+        assert key in plot

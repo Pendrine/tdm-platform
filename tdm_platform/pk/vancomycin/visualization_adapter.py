@@ -14,6 +14,14 @@ def build_plot_payload(
     errors: list[str] | None = None,
 ) -> dict:
     if final_decision is None:
+        dose_markers = [
+            {
+                "event_type": e.event_type,
+                "time": e.payload.get("t_from_last_start_h", 0.0),
+                "dose": e.value,
+            }
+            for e in dose_events
+        ]
         return {
             "title": "Vancomycin model fit",
             "single_model": None,
@@ -24,6 +32,7 @@ def build_plot_payload(
             "best_y": [],
             "obs_x": list(observation_times),
             "obs_y": list(observation_values),
+            "dose_events": dose_markers,
             "metadata": metadata or {},
             "warnings": warnings or [],
             "errors": errors or ["Nincs elérhető végső modell döntés."],
@@ -76,6 +85,7 @@ def build_plot_payload(
         "best_y": list(final_decision.ranking[1].predicted_concentrations if len(final_decision.ranking) > 1 else single.predicted_concentrations),
         "obs_x": list(observation_times),
         "obs_y": list(observation_values),
+        "dose_events": dose_markers,
         "metadata": metadata or {},
         "warnings": warnings or [],
         "errors": errors or [],

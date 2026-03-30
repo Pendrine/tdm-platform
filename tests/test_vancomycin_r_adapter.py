@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from tdm_platform.pk.vancomycin.r_backend_adapter import build_r_input, map_r_output_to_plot_payload, run_r_engine
+from tdm_platform.pk.vancomycin.r_backend_adapter import build_r_input, map_r_output_to_plot_payload, resolve_rscript_path, run_r_engine
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calculate
 
 
@@ -32,6 +32,53 @@ def test_run_r_engine_missing_script_returns_structured_error(tmp_path: Path):
     assert result["status"] == "error"
     assert result["errors"]
     assert "debug" in result
+
+
+def test_resolve_rscript_path_prefers_existing_env(monkeypatch, tmp_path: Path):
+    fake = tmp_path / "Rscript.exe"
+    fake.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("RSCRIPT_PATH", str(fake))
+    resolved, err = resolve_rscript_path()
+    assert err is None
+    assert resolved == str(fake.resolve())
+
+
+def test_resolve_rscript_path_errors_on_missing_env(monkeypatch):
+    monkeypatch.setenv("RSCRIPT_PATH", "/definitely/missing/Rscript.exe")
+    resolved, err = resolve_rscript_path()
+    assert resolved is None
+    assert "Configured RSCRIPT_PATH not found" in (err or "")
+
+
+def test_resolve_rscript_path_falls_back_to_which(monkeypatch):
+    monkeypatch.delenv("RSCRIPT_PATH", raising=False)
+    with patch("tdm_platform.pk.vancomycin.r_backend_adapter.shutil.which", return_value="/usr/bin/Rscript"):
+        resolved, err = resolve_rscript_path()
+    assert err is None
+    assert resolved
+
+
+def test_run_r_engine_uses_resolved_rscript_in_command(monkeypatch, tmp_path: Path):
+    script = tmp_path / "run_engine.R"
+    script.write_text("placeholder", encoding="utf-8")
+    fake_rscript = tmp_path / "Rscript.exe"
+    fake_rscript.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("RSCRIPT_PATH", str(fake_rscript))
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, capture_output, text, check):
+        out_path = Path(cmd[3])
+        out_path.write_text(json.dumps({"status": "ok", "engine": "R_Bayesian", "model_key": "goti_2018"}), encoding="utf-8")
+        return _Proc()
+
+    with patch("tdm_platform.pk.vancomycin.r_backend_adapter.subprocess.run", side_effect=_fake_run):
+        result = run_r_engine({"method": "Bayesian"}, r_script_path=script)
+    assert result["status"] == "ok"
+    assert result["debug"]["adapter_debug"]["command"][0] == str(fake_rscript.resolve())
 
 
 def test_map_r_output_to_plot_payload_keeps_debug_and_curves():
@@ -153,3 +200,24 @@ def test_bayesian_with_selected_model_tries_r_backend():
             )
         )
     assert mocked.called
+
+
+def test_bayesian_missing_rscript_sets_fallback_reason(monkeypatch):
+    monkeypatch.setenv("RSCRIPT_PATH", "/definitely/missing/Rscript.exe")
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Bayesian",
+        )
+    )
+    assert result["fallback_reason"] == "rscript_not_found_or_unresolved"

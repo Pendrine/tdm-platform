@@ -176,11 +176,15 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "fallback_reason": "",
             }
         # Fail-safe fallback to Python workflow path with explicit warning.
+        fallback_reason_code = r_out.get("error_code") or (
+            "rscript_not_found_or_unresolved" if any("RSCRIPT_PATH" in str(e) or "Rscript executable not found" in str(e) for e in (r_out.get("errors") or [])) else "r_backend_failed"
+        )
         fallback_warning = f"R backend fallback: {', '.join(r_out.get('errors', []) or ['ismeretlen hiba'])}"
         print("[DEBUG][ENGINE] ENGINE=PYTHON_FALLBACK")
     else:
         print("[DEBUG][ENGINE] ENGINE=CLASSICAL_PYTHON")
         fallback_warning = None
+        fallback_reason_code = ""
     workflow = run_vancomycin_workflow(
         {
             "patient_id": inp.patient_id,
@@ -317,5 +321,5 @@ def calculate(inp: VancomycinInputs) -> dict:
         "engine_source": "PYTHON_FALLBACK" if fallback_warning else "CLASSICAL_PYTHON",
         "used_r_backend": False,
         "fallback_used": bool(fallback_warning),
-        "fallback_reason": fallback_warning or "",
+        "fallback_reason": fallback_reason_code or "",
     }

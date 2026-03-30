@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -9,6 +11,27 @@ from typing import Any
 
 def _default_r_script_path() -> Path:
     return Path(__file__).resolve().parents[3] / "r_pk_engine" / "run_engine.R"
+
+
+def resolve_rscript_path() -> tuple[str | None, str | None]:
+    env_path = os.environ.get("RSCRIPT_PATH", "").strip()
+    if env_path:
+        candidate = Path(env_path).expanduser().resolve()
+        if candidate.exists():
+            return str(candidate), None
+        return None, f"Configured RSCRIPT_PATH not found: {candidate}"
+    which_path = shutil.which("Rscript")
+    if which_path:
+        return str(Path(which_path).resolve()), None
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    candidates = []
+    if local_app:
+        candidates.extend(Path(local_app).glob("Programs/R/R-*/bin/Rscript.exe"))
+    candidates.extend(Path("C:/Program Files/R").glob("R-*/bin/Rscript.exe"))
+    for candidate in sorted(candidates, reverse=True):
+        if candidate.exists():
+            return str(candidate.resolve()), None
+    return None, "Rscript executable not found (env/which/windows autodetect)."
 
 
 def build_r_input(inp: Any) -> dict[str, Any]:
@@ -70,14 +93,30 @@ def map_r_output_to_plot_payload(r_output: dict[str, Any]) -> dict[str, Any]:
 
 def run_r_engine(payload: dict[str, Any], r_script_path: Path | None = None) -> dict[str, Any]:
     script = r_script_path or _default_r_script_path()
+    resolved_rscript, resolve_error = resolve_rscript_path()
     debug: dict[str, Any] = {
         "script_path": str(script),
+        "env_rscript_path": os.environ.get("RSCRIPT_PATH", ""),
+        "resolved_rscript_path": resolved_rscript,
+        "resolved_rscript_exists": bool(resolved_rscript and Path(resolved_rscript).exists()),
         "command": [],
         "stdout": "",
         "stderr": "",
         "return_code": None,
         "input_summary": {"keys": sorted(payload.keys())},
     }
+    print("[DEBUG][R_ADAPTER] env RSCRIPT_PATH:", debug["env_rscript_path"])
+    print("[DEBUG][R_ADAPTER] resolved_rscript_path:", resolved_rscript)
+    print("[DEBUG][R_ADAPTER] exists(resolved_rscript_path):", debug["resolved_rscript_exists"])
+    if resolve_error:
+        print("[DEBUG][R_ADAPTER] resolve_error:", resolve_error)
+        return {
+            "status": "error",
+            "errors": [resolve_error],
+            "warnings": [],
+            "debug": debug,
+            "error_code": "rscript_not_found_or_unresolved",
+        }
     if not script.exists():
         print(f"[DEBUG][R_ADAPTER] script missing: {script}")
         return {"status": "error", "errors": [f"R script nem található: {script}"], "warnings": [], "debug": debug}
@@ -85,10 +124,11 @@ def run_r_engine(payload: dict[str, Any], r_script_path: Path | None = None) -> 
         in_path = Path(td) / "input.json"
         out_path = Path(td) / "output.json"
         in_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        cmd = ["Rscript", str(script), str(in_path), str(out_path)]
+        cmd = [str(resolved_rscript), str(script), str(in_path), str(out_path)]
         debug["command"] = cmd
         print("[DEBUG][R_ADAPTER] script_path:", script)
         print("[DEBUG][R_ADAPTER] command:", cmd)
+        print("[DEBUG][R_ADAPTER] final command[0]:", cmd[0])
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
         except Exception as exc:

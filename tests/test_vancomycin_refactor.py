@@ -208,6 +208,9 @@ def test_event_normalization_aliases():
     assert normalize_event_type("loading dose") == "loading_dose"
     assert normalize_event_type("maintenance") == "maintenance_dose"
     assert normalize_event_type("supplemental_dose") == "extra_dose"
+    assert normalize_event_type("extra dose") == "extra_dose"
+    assert normalize_event_type("MIC result") == "mic_result"
+    assert normalize_event_type("creatinine result") == "creatinine"
     assert normalize_event_type("scr") == "creatinine"
 
 
@@ -231,12 +234,16 @@ def test_workflow_loading_maintenance_extra_summary_and_plot():
             {"event_type": "extra_dose", "time_h": 6, "dose_mg": 250, "tinf_h": 1},
             {"event_type": "sample", "time_h": 2, "level_mg_l": 24},
             {"event_type": "sample", "time_h": 10, "level_mg_l": 12},
+            {"event_type": "MIC result", "time_h": 0, "mic": 1.0},
+            {"event_type": "creatinine result", "time_h": 0, "creatinine": 100},
         ],
     }
     result = run_vancomycin_workflow(payload, history_rows=[])
     assert result["event_summary"]["loading_dose_present"]
     assert result["event_summary"]["maintenance_dose_count"] >= 1
     assert result["event_summary"]["extra_dose_count"] >= 1
+    assert result["event_summary"]["mic_present"]
+    assert result["event_summary"]["creatinine_event_count"] >= 1
     assert len(result["plot"]["single_model"]["dose_events"]) >= 2
 
 
@@ -263,6 +270,7 @@ def test_workflow_insufficient_samples_returns_structured_error():
     assert result["errors"]
     assert "legalább két érvényes mérési pont" in result["errors"][0]
     assert result["plot"]["errors"]
+    assert result["plot"]["obs_y"]
 
 
 def test_engine_missing_mic_has_explicit_auc_mic_status():

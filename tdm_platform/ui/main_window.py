@@ -314,12 +314,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
     @staticmethod
     def _event_type_options() -> list[tuple[str, str]]:
         return [
-            ("maintenance dose", "maintenance dose"),
-            ("loading dose", "loading dose"),
-            ("extra dose", "extra dose"),
+            ("maintenance dose", "maintenance_dose"),
+            ("loading dose", "loading_dose"),
+            ("extra dose", "extra_dose"),
             ("sample", "sample"),
-            ("MIC result", "mic result"),
-            ("creatinine result", "creatinine result"),
+            ("MIC result", "mic_result"),
+            ("creatinine result", "creatinine"),
         ]
 
     def _set_event_type_widget(self, row: int, event_type: str) -> None:
@@ -328,11 +328,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         combo = QComboBox()
         for label, value in self._event_type_options():
             combo.addItem(label, value)
-        normalized = str(event_type or "").strip().lower().replace("_", " ")
+        normalized = str(event_type or "").strip().lower().replace("-", "_").replace(" ", "_")
         idx = combo.findData(normalized)
         if idx < 0:
             for i in range(combo.count()):
-                if combo.itemText(i).strip().lower() == normalized:
+                text_norm = combo.itemText(i).strip().lower().replace("-", "_").replace(" ", "_")
+                if text_norm == normalized:
                     idx = i
                     break
         combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -392,12 +393,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         row = self.episode_events_table.rowCount()
         self.episode_events_table.insertRow(row)
         values = {
-            "loading_dose": ["0.0", "loading dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
-            "maintenance_dose": ["0.0", "maintenance dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
-            "extra_dose": ["0.0", "extra dose", self.dose_edit.text().strip() or "500", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
+            "loading_dose": ["0.0", "loading_dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
+            "maintenance_dose": ["0.0", "maintenance_dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
+            "extra_dose": ["0.0", "extra_dose", self.dose_edit.text().strip() or "500", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
             "sample": [self.t1_edit.text().strip() or "2.0", "sample", "", "", self.level1_rel_edit.text().strip() or "20", "", "", ""],
-            "mic_result": ["0.0", "MIC result", "", "", "", self.mic_edit.text().strip() or "1.0", "", ""],
-            "creatinine_result": ["0.0", "creatinine result", "", "", "", "", self.scr_edit.text().strip() or "90", ""],
+            "mic_result": ["0.0", "mic_result", "", "", "", self.mic_edit.text().strip() or "1.0", "", ""],
+            "creatinine_result": ["0.0", "creatinine", "", "", "", "", self.scr_edit.text().strip() or "90", ""],
         }.get(event_type, ["", event_type, "", "", "", "", "", ""])
         for col, val in enumerate(values):
             if col == 1:
@@ -433,7 +434,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 self.loading_time_edit.setText(str(event.get("time_h", "")))
             elif "mic" in kind:
                 self.mic_edit.setText(str(event.get("mic", "")))
-            elif "creatinine" in kind:
+            elif "creatinine" in kind or kind == "scr":
                 self.scr_edit.setText(str(event.get("creatinine", "")))
         sample_events.sort(key=lambda x: x[0])
         if len(sample_events) >= 1:
@@ -698,7 +699,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 self._append_episode_event("sample")
                 self._append_episode_event("sample")
             # Maintain at least one maintenance dose row.
-            self._set_event_type_widget(0, "maintenance dose")
+            self._set_event_type_widget(0, "maintenance_dose")
             self.episode_events_table.setItem(0, 2, QTableWidgetItem(self.dose_edit.text().strip()))
             self.episode_events_table.setItem(0, 3, QTableWidgetItem(self.tinf_edit.text().strip()))
             # First two sample rows.
@@ -729,7 +730,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 else:
                     self._append_episode_event("loading_dose")
                     r = self.episode_events_table.rowCount() - 1
-                    self._set_event_type_widget(r, "loading dose")
+                    self._set_event_type_widget(r, "loading_dose")
                     self.episode_events_table.setItem(r, 0, QTableWidgetItem(loading_time))
                     self.episode_events_table.setItem(r, 2, QTableWidgetItem(loading_value))
 
@@ -747,9 +748,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 self.episode_events_table.setItem(r, col, QTableWidgetItem(value))
 
             if self.mic_edit.text().strip():
-                _upsert_row("mic result", 5, self.mic_edit.text().strip())
+                _upsert_row("mic_result", 5, self.mic_edit.text().strip())
             if self.scr_edit.text().strip():
-                _upsert_row("creatinine result", 6, self.scr_edit.text().strip())
+                _upsert_row("creatinine", 6, self.scr_edit.text().strip())
         finally:
             self._sync_from_table_lock = False
 
@@ -1295,9 +1296,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def render_plot(self, spec: dict):
         self._last_plot_spec = spec or {}
+        print("[DEBUG][PLOT] keys:", list((spec or {}).keys()))
+        print("[DEBUG][PLOT] single_model:", (spec or {}).get("single_model"))
+        print("[DEBUG][PLOT] len current_y:", len((spec or {}).get("current_y", []) or []))
+        print("[DEBUG][PLOT] len obs_y:", len((spec or {}).get("obs_y", []) or []))
+        print("[DEBUG][PLOT] errors:", (spec or {}).get("errors", []))
+        print("[DEBUG][PLOT] warnings:", (spec or {}).get("warnings", []))
         single = spec.get("single_model") or {}
         avg = spec.get("model_averaging") or {}
-        if single:
+        errors = spec.get("errors", []) or []
+        warnings = spec.get("warnings", []) or []
+        if single and not errors:
             fig = go.Figure()
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
             if show_averaging and avg and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
@@ -1383,8 +1392,29 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     for col, value in enumerate(values):
                         self.model_avg_table.setItem(row, col, QTableWidgetItem(str(value)))
             return
+        fallback_obs_x = spec.get("obs_x", []) or []
+        fallback_obs_y = spec.get("obs_y", []) or []
+        fallback_dose_events = []
+        if isinstance(single, dict):
+            fallback_dose_events = single.get("dose_events", []) or []
+        lines = ["<h3>Nincs megjeleníthető modellillesztési eredmény</h3>"]
+        if fallback_obs_x and fallback_obs_y:
+            obs_rows = "".join(f"<li>t={x}h, C={y} mg/L</li>" for x, y in zip(fallback_obs_x, fallback_obs_y))
+            lines.append(f"<p><b>Observed pontok:</b></p><ul>{obs_rows}</ul>")
+        if fallback_dose_events:
+            dose_rows = "".join(
+                f"<li>{str(e.get('event_type','dose'))}: t={e.get('time', 0)}h, dose={e.get('dose', '-')}</li>"
+                for e in fallback_dose_events
+            )
+            lines.append(f"<p><b>Dózisesemények:</b></p><ul>{dose_rows}</ul>")
+        if errors:
+            err_rows = "".join(f"<li>{err}</li>" for err in errors)
+            lines.append(f"<p><b>Hibák:</b></p><ul>{err_rows}</ul>")
+        if warnings:
+            warn_rows = "".join(f"<li>{warn}</li>" for warn in warnings)
+            lines.append(f"<p><b>Figyelmeztetések:</b></p><ul>{warn_rows}</ul>")
         if hasattr(self, "viz_plot_view"):
-            self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
+            self.viz_plot_view.setHtml("".join(lines))
         return
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:

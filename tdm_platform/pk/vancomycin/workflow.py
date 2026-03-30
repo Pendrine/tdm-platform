@@ -26,10 +26,13 @@ EVENT_TYPE_ALIASES = {
     "maintenance dose": "maintenance_dose",
     "maintenance_dose": "maintenance_dose",
     "extra_dose": "extra_dose",
+    "extra dose": "extra_dose",
     "supplemental_dose": "extra_dose",
     "mic": "mic_result",
     "mic_result": "mic_result",
+    "mic result": "mic_result",
     "creatinine": "creatinine",
+    "creatinine result": "creatinine",
     "scr": "creatinine",
     "serum_creatinine": "creatinine",
 }
@@ -223,13 +226,21 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
     errors.extend(fit_result.get("errors", []))
     if not ranking:
         error_message = errors[0] if errors else "A modellillesztéshez legalább két érvényes mérési pont szükséges."
+        times = tuple(float(e.payload.get("t_from_last_start_h", 0.0)) for e in episode.events if e.event_type == "sample")
+        values = tuple(float(e.value) for e in episode.events if e.event_type == "sample" and isinstance(e.value, (int, float)))
+        dose_events = tuple(e for e in episode.events if "dose" in e.event_type)
+        print("[DEBUG][WORKFLOW] ranking length: 0")
+        print("[DEBUG][WORKFLOW] event_summary:", event_summary)
+        print("[DEBUG][WORKFLOW] fit_debug:", fit_result.get("debug", {}))
+        print("[DEBUG][WORKFLOW] errors:", [error_message])
+        print("[DEBUG][WORKFLOW] warnings:", warnings)
         return {
             "episode": episode,
             "weights": weights,
             "auto_selection": selection,
             "final": None,
             "recommendation": None,
-            "plot": build_plot_payload(tuple(), tuple(), None, tuple(), metadata={"event_summary": event_summary}, warnings=warnings, errors=[error_message]),
+            "plot": build_plot_payload(times, values, None, dose_events, metadata={"event_summary": event_summary}, warnings=warnings, errors=[error_message]),
             "best": None,
             "history_matches": previous,
             "history_matches_all_antibiotics": previous_all_antibiotics,
@@ -280,6 +291,11 @@ def run_vancomycin_workflow(payload: dict, history_rows: list[dict] | None = Non
         weights,
         strategy=get_model(final.selected_model_key).weight_strategy_crcl,
     )
+    print("[DEBUG][WORKFLOW] ranking length:", len(ranking))
+    print("[DEBUG][WORKFLOW] event_summary:", event_summary)
+    print("[DEBUG][WORKFLOW] fit_debug:", fit_result.get("debug", {}))
+    print("[DEBUG][WORKFLOW] errors:", errors)
+    print("[DEBUG][WORKFLOW] warnings:", warnings)
 
     return {
         "episode": episode,

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QDateTime, QTime
+from PySide6.QtCore import QDate, QDateTime, QTime, QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -573,7 +573,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self._last_pk_payload = pk
             method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
             self._refresh_model_override_options(method)
-            print(f"[DEBUG][UI] _run_model_selection_only method_combo={method}")
+            print(
+                f"[DEBUG][UI] _run_model_selection_only method_combo={method} "
+                f"selected_model_key={(self.model_override_combo.currentData() if hasattr(self, 'model_override_combo') else None)}"
+            )
             res = self.calc_vancomycin(pk, method or "Bayesian")
             self.results = res
             self.latest_report = res["report"]
@@ -598,6 +601,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if not hasattr(self, "model_override_combo"):
             return
         combo = self.model_override_combo
+        previous_value = combo.currentData() if combo.count() else None
         combo.blockSignals(True)
         try:
             combo.clear()
@@ -609,7 +613,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 for model in active_models():
                     combo.addItem(model.label, model.key)
             if combo.count() > 0:
-                combo.setCurrentIndex(0)
+                restored_idx = combo.findData(previous_value) if previous_value is not None else -1
+                combo.setCurrentIndex(restored_idx if restored_idx >= 0 else 0)
         finally:
             combo.blockSignals(False)
 
@@ -667,9 +672,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._reset_non_vancomycin_views() if self.antibiotic_combo.currentText() != "Vancomycin" else None
 
     def collect_pk_inputs(self) -> dict:
-        payload = self.collect_common()
+        payload = self._collect_common_with_events()
         payload["method"] = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
-        print(f"[DEBUG][UI] collect_pk_inputs method={payload.get('method')}")
+        payload["selected_model_key"] = (self.model_override_combo.currentData() if hasattr(self, "model_override_combo") else None) or None
+        sample_events = [e for e in (payload.get("episode_events") or []) if "sample" in str(e.get("event_type", "")).lower()]
+        sample_values = [e.get("level_mg_l") for e in sample_events]
+        print(f"[DEBUG][UI] collect_pk_inputs method={payload.get('method')} selected_model_key={payload.get('selected_model_key')}")
+        print(f"[DEBUG][UI] collect_pk_inputs sample_count={len(sample_events)} sample_values={sample_values}")
         return payload
 
     def _collect_episode_events(self) -> list[dict]:
@@ -917,7 +926,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self._last_pk_payload = pk
             method = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
             self._refresh_model_override_options(method)
-            print(f"[DEBUG][UI] calculate method_combo={method}")
+            print(
+                f"[DEBUG][UI] calculate method_combo={method} "
+                f"selected_model_key={(self.model_override_combo.currentData() if hasattr(self, 'model_override_combo') else None)}"
+            )
             res = self.calc_vancomycin(pk, method or "Bayesian")
             self.results = res
             self.latest_report = res["report"]
@@ -1436,9 +1448,33 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 widget.setHtml(html)
             else:
                 print("[DEBUG][PLOT] render branch: plotly_html")
-                html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
+                chart_div_id = "vanco_plot_chart"
+                plot_div = pio.to_html(
+                    fig,
+                    include_plotlyjs="inline",
+                    full_html=False,
+                    default_height="520px",
+                    default_width="100%",
+                    div_id=chart_div_id,
+                )
+                html = (
+                    "<html><head><meta charset='utf-8'></head>"
+                    "<body style='margin:0; padding:0; overflow:hidden;'>"
+                    f"{plot_div}</body></html>"
+                )
+                print("[DEBUG][PLOT] generated_html_length:", len(html))
+                print("[DEBUG][PLOT] html contains Plotly.newPlot?:", "Plotly.newPlot" in html)
+                print("[DEBUG][PLOT] chart div id:", chart_div_id)
+                set_html_called = False
                 if hasattr(self, "viz_plot_view"):
-                    self.viz_plot_view.setHtml(html)
+                    view = self.viz_plot_view
+                    if hasattr(view, "setHtml"):
+                        try:
+                            view.setHtml(html, QUrl.fromLocalFile(str(Path.cwd()) + "/"))
+                        except TypeError:
+                            view.setHtml(html)
+                        set_html_called = True
+                print("[DEBUG][PLOT] setHtml called?:", set_html_called)
             if hasattr(self, "viz_single"):
                 fit = single.get("fit", {})
                 rmse = fit.get("rmse")
@@ -1517,6 +1553,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         selected_model_key = (self.model_override_combo.currentData() if hasattr(self, "model_override_combo") else None) or None
         if method == "Klasszikus":
             selected_model_key = "trapezoid_classic"
+        print(f"[DEBUG][UI] calc_vancomycin ui_selected_model_key={selected_model_key}")
+        print(f"[DEBUG][UI] calc_vancomycin payload_selected_model_key={pk.get('selected_model_key')}")
         result = calculate_vancomycin(
             VancomycinInputs(
                 sex=str(pk["sex"]),
@@ -1560,6 +1598,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "fallback_used": result.get("fallback_used"),
             },
         )
+        is_classical_mode = method == "Klasszikus" or result.get("selected_model_key") == "trapezoid_classic"
 
         auto = result.get("auto_selection", {})
         fit_summary = result.get("fit_summary", [])
@@ -1574,29 +1613,55 @@ class MainWindow(legacy_ui.TDMMainWindow):
             f"VANCOMYCIN – {method}",
             f"Számolási motor: {'R Bayesian backend' if result.get('engine_source') == 'R_BACKEND' else ('Python fallback' if result.get('engine_source') == 'PYTHON_FALLBACK' else 'Klasszikus Python')}",
             "",
-            "Auto-select",
-            f"- Ajánlott modell: {auto.get('recommended_model_key', '-')}",
-            f"- Alternatívák: {', '.join(auto.get('alternative_model_keys', [])) if auto.get('alternative_model_keys') else 'nincs'}",
-            f"- Bayesian preferált: {'igen' if auto.get('bayesian_preferred') else 'nem'}",
-            f"- Trapezoid használható: {'igen' if auto.get('trapezoid_eligible') else 'nem'}",
-            f"- Indoklás: {auto.get('rationale', '-')}",
-            "",
             "PK/PD",
             f"- AUC24: {self._fmt_float(result.get('auc24'), 1)} mg·h/L",
             f"- AUC/MIC: {self._fmt_float(result.get('auc_mic'), 1, na='n.a.')}",
             f"- Peak: {self._fmt_float(result.get('peak'), 1)} mg/L | Trough: {self._fmt_float(result.get('trough'), 1)} mg/L",
             f"- CL: {self._fmt_float(result.get('cl_l_h'), 2)} L/h | Vd: {self._fmt_float(result.get('vd_l'), 2)} L | CrCl: {self._fmt_float(result.get('crcl'), 1)} mL/perc",
-            "",
-            "Final ranker",
-            f"- Kiválasztott modell: {result.get('selected_model_key', '-')}",
-            f"- Magyarázat: {result.get('final_explanation', '-')}",
-            "",
-            "Model fit rangsor",
-            *(fit_lines or ["- nincs modellillesztési adat"]),
-            "",
-            "Előzmény panel (minden antibiotikum)",
-            f"- Korábbi epizódok: {history_text}",
         ]
+        if not is_classical_mode:
+            active_keys = [m.key for m in active_models()]
+            bayes_compare_lines = [
+                f"- Aktív modellek: {', '.join(active_keys)}",
+                f"- Választott modell: {result.get('selected_model_key', '-')}",
+            ]
+            if fit_summary:
+                bayes_compare_lines.extend(
+                    [
+                        f"- {item.get('model_key', '-')}: AUC24={self._fmt_float(item.get('auc24'), 1)}, "
+                        f"Trough={self._fmt_float(item.get('trough'), 1)}, "
+                        f"RMSE={self._fmt_float(item.get('rmse'), 3)}, MAE={self._fmt_float(item.get('mae'), 3)}"
+                        for item in fit_summary[:3]
+                    ]
+                )
+            else:
+                bayes_compare_lines.append(f"- Selector indoklás: {auto.get('rationale', '-')}")
+            report.extend(
+                [
+                    "",
+                    "Auto-select",
+                    f"- Ajánlott modell: {auto.get('recommended_model_key', '-')}",
+                    f"- Alternatívák: {', '.join(auto.get('alternative_model_keys', [])) if auto.get('alternative_model_keys') else 'nincs'}",
+                    f"- Bayesian preferált: {'igen' if auto.get('bayesian_preferred') else 'nem'}",
+                    f"- Trapezoid használható: {'igen' if auto.get('trapezoid_eligible') else 'nem'}",
+                    f"- Indoklás: {auto.get('rationale', '-')}",
+                    "",
+                    "Final ranker",
+                    f"- Kiválasztott modell: {result.get('selected_model_key', '-')}",
+                    f"- Magyarázat: {result.get('final_explanation', '-')}",
+                    "",
+                    "Bayesian model összehasonlítás",
+                    *bayes_compare_lines,
+                    "",
+                    "Model fit rangsor",
+                    *(fit_lines or ["- nincs modellillesztési adat"]),
+                    "",
+                    "Előzmény panel (minden antibiotikum)",
+                    f"- Korábbi epizódok: {history_text}",
+                ]
+            )
+        else:
+            report.extend(["", "Klasszikus trapezoid számítás.", f"- Magyarázat: {result.get('final_explanation', '-')}", ""])
 
         plot = result.get("plot") or {
             "title": "Vancomycin koncentráció-idő profil",
@@ -1689,6 +1754,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def _update_structured_result_views(self, pk_result: dict) -> None:
         if not pk_result:
             return
+        is_classical = pk_result.get("selected_model_key") == "trapezoid_classic"
         if hasattr(self, "pkpd_table"):
             rows = [
                 [
@@ -1711,20 +1777,26 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 for c, value in enumerate(row):
                     self.pkpd_table.setItem(r, c, QTableWidgetItem(value))
         if hasattr(self, "final_decision_browser"):
-            self.final_decision_browser.setHtml(
-                f"<h3>Final decision</h3><p><b>Kiválasztott modell:</b> {pk_result.get('selected_model_key', '-')}</p>"
-                f"<p>{pk_result.get('final_explanation', '-')}</p>"
-            )
+            if is_classical:
+                self.final_decision_browser.setHtml("<h3>Final decision</h3><p>Klasszikus módban nincs Bayesian final ranker.</p>")
+            else:
+                self.final_decision_browser.setHtml(
+                    f"<h3>Final decision</h3><p><b>Kiválasztott modell:</b> {pk_result.get('selected_model_key', '-')}</p>"
+                    f"<p>{pk_result.get('final_explanation', '-')}</p>"
+                )
         if hasattr(self, "auto_select_browser"):
             auto = pk_result.get("auto_selection", {})
-            self.auto_select_browser.setHtml(
-                "<h3>Automatikus modellválasztás</h3>"
-                f"<p><b>Javasolt:</b> {auto.get('recommended_model_key', '-')}</p>"
-                f"<p><b>Alternatívák:</b> {', '.join(auto.get('alternative_model_keys', [])) or 'nincs'}</p>"
-                f"<p><b>Bayesian preferált:</b> {'igen' if auto.get('bayesian_preferred') else 'nem'}</p>"
-                f"<p><b>Trapezoid használható:</b> {'igen' if auto.get('trapezoid_eligible') else 'nem'}</p>"
-                f"<p><b>Indoklás:</b> {auto.get('rationale', '-')}</p>"
-            )
+            if is_classical:
+                self.auto_select_browser.setHtml("<h3>Automatikus modellválasztás</h3><p>Klasszikus módban rejtve.</p>")
+            else:
+                self.auto_select_browser.setHtml(
+                    "<h3>Automatikus modellválasztás</h3>"
+                    f"<p><b>Javasolt:</b> {auto.get('recommended_model_key', '-')}</p>"
+                    f"<p><b>Alternatívák:</b> {', '.join(auto.get('alternative_model_keys', [])) or 'nincs'}</p>"
+                    f"<p><b>Bayesian preferált:</b> {'igen' if auto.get('bayesian_preferred') else 'nem'}</p>"
+                    f"<p><b>Trapezoid használható:</b> {'igen' if auto.get('trapezoid_eligible') else 'nem'}</p>"
+                    f"<p><b>Indoklás:</b> {auto.get('rationale', '-')}</p>"
+                )
         if hasattr(self, "model_meta_browser"):
             selected_key = pk_result.get("selected_model_key")
             if selected_key == "trapezoid_classic":
@@ -1747,6 +1819,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 )
         if hasattr(self, "fit_table"):
             self.fit_table.setRowCount(0)
+            if is_classical:
+                return
             for item in pk_result.get("fit_summary", []):
                 row = self.fit_table.rowCount()
                 self.fit_table.insertRow(row)

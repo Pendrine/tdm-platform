@@ -262,6 +262,34 @@ def test_bayesian_with_selected_model_tries_r_backend():
     assert mocked.called
 
 
+def test_bayesian_selected_model_key_is_forwarded_to_r_payload():
+    captured = {}
+
+    def _fake_run_r_engine(payload):
+        captured["selected_model_key"] = payload.get("selected_model_key")
+        return {"status": "error", "errors": ["forced"], "warnings": [], "debug": {}}
+
+    with patch("tdm_platform.pk.vancomycin_engine.run_r_engine", side_effect=_fake_run_r_engine):
+        calculate(
+            VancomycinInputs(
+                sex="férfi",
+                age=60,
+                weight_kg=80,
+                scr_umol=100,
+                dose_mg=1000,
+                tau_h=12,
+                tinf_h=1,
+                c1=25,
+                t1_start_h=2,
+                c2=12,
+                t2_start_h=10,
+                method="Bayesian",
+                selected_model_key="roberts_2011",
+            )
+        )
+    assert captured["selected_model_key"] == "roberts_2011"
+
+
 def test_bayesian_missing_rscript_sets_fallback_reason(monkeypatch):
     monkeypatch.setenv("RSCRIPT_PATH", "/definitely/missing/Rscript.exe")
     result = calculate(

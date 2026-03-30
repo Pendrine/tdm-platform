@@ -1,11 +1,26 @@
 #!/usr/bin/env Rscript
+args_all <- commandArgs(trailingOnly = FALSE)
+file_arg_idx <- grep("^--file=", args_all)
+if (length(file_arg_idx) < 1) {
+  stop("run_engine.R bootstrap error: --file= argument not found.")
+}
+file_arg <- sub("^--file=", "", args_all[file_arg_idx[1]])
+script_path <- normalizePath(file_arg, winslash = "/", mustWork = TRUE)
+script_dir <- dirname(script_path)
+
+message("[R_ENGINE] resolved script_path: ", script_path)
+message("[R_ENGINE] resolved script_dir: ", script_dir)
+message("[R_ENGINE] source io_json: ", file.path(script_dir, "io_json.R"))
+message("[R_ENGINE] source selector: ", file.path(script_dir, "selector.R"))
+message("[R_ENGINE] source dose_history: ", file.path(script_dir, "dose_history.R"))
+
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 2) stop('Usage: run_engine.R <input.json> <output.json>')
 input_path <- args[[1]]
 output_path <- args[[2]]
-source(file.path(dirname(sys.frame(1)$ofile %||% 'run_engine.R'), 'io_json.R'))
-source(file.path(dirname(sys.frame(1)$ofile %||% 'run_engine.R'), 'selector.R'))
-source(file.path(dirname(sys.frame(1)$ofile %||% 'run_engine.R'), 'dose_history.R'))
+source(file.path(script_dir, 'io_json.R'))
+source(file.path(script_dir, 'selector.R'))
+source(file.path(script_dir, 'dose_history.R'))
 `%||%` <- function(a,b) if (!is.null(a)) a else b
 input <- read_json_file(input_path)
 sel <- select_model(input)

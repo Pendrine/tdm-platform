@@ -2057,19 +2057,22 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     for opt in options[:5]
                 ]
             )
+            target_note = (
+                "<p><b>PK/PD cél:</b> MIC elérhető → elsődleges cél AUC/MIC ≥400; AUC24 túlzott expozíció guardrail.</p>"
+                if mic_primary
+                else "<p><b>PK/PD cél:</b> MIC hiányzik → AUC24 célablak 400–600.</p>"
+            )
             self.recommendation_browser.setHtml(
                 f"<h3>Recommendation</h3><p><b>Expozíció:</b> {pk_result.get('status', '-')}</p>"
+                + target_note
                 + (
-                    "<p><b>PK/PD cél:</b> MIC elérhető → elsődleges cél AUC/MIC ≥400; AUC24 túlzott expozíció guardrail.</p>"
-                    if mic_primary
-                    else "<p><b>PK/PD cél:</b> MIC hiányzik → AUC24 célablak 400–600.</p>"
-                )
                 f"<p><b>Javaslat:</b> {suggestion.get('dose', 0):.0f} mg q{suggestion.get('tau', 0):.0f}h | "
                 f"AUC24 {self._fmt_float(suggestion.get('auc24'), 1)}, "
                 f"trough {self._fmt_float(suggestion.get('trough'), 1)}, "
                 f"peak {self._fmt_float(suggestion.get('peak'), 1)}</p>"
                 f"{warning}"
                 f"<p><b>Top opciók:</b></p><ol>{option_lines or '<li>nincs</li>'}</ol>"
+                )
             )
         if hasattr(self, "history_summary_browser"):
             summary = pk_result.get("history_summary_by_antibiotic", {})

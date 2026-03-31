@@ -1746,6 +1746,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         trap = result.get("trapezoid_assessment", {})
         regimen_options = result.get("regimen_options", [])
         support = dist.get("supporting_metrics", {})
+        target_assessment = result.get("target_assessment", {})
+        mic_primary = target_assessment.get("target_basis") == "auc_mic_primary"
 
         report = [
             f"VANCOMYCIN – {method}",
@@ -1756,6 +1758,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
             f"- AUC/MIC: {self._fmt_float(result.get('auc_mic'), 1, na='n.a.')}",
             f"- Peak: {self._fmt_float(result.get('peak'), 1)} mg/L | Trough: {self._fmt_float(result.get('trough'), 1)} mg/L",
             f"- CL: {self._fmt_float(result.get('cl_l_h'), 2)} L/h | Vd: {self._fmt_float(result.get('vd_l'), 2)} L | CrCl: {self._fmt_float(result.get('crcl'), 1)} mL/perc",
+            (
+                "- MIC rendelkezésre áll, ezért az elsődleges PK/PD cél az AUC/MIC >= 400; "
+                "az AUC24 a túlzott expozíció megítélésére is figyelembe vett."
+                if mic_primary
+                else "- MIC nem áll rendelkezésre, ezért az értékelés AUC24 célablak (400–600 mg·h/L) alapján történik."
+            ),
             "",
             "Súly és eloszlási mutatók",
             f"- ABW: {self._fmt_float(weight_metrics.get('abw_kg'), 1)} kg | IBW: {self._fmt_float(weight_metrics.get('ibw_kg'), 1)} kg | AdjBW: {self._fmt_float(weight_metrics.get('adjbw_kg'), 1)} kg",
@@ -1826,17 +1834,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
             report.append("- Az alábbi klasszikus adagolási opciók tájékoztató jellegűek; komplex kinetika gyanúja esetén Bayesian megközelítés előnyösebb lehet.")
         if regimen_options:
             for idx, opt in enumerate(regimen_options[:5], start=1):
-                report.append(
+                line = (
                     f"{idx}. {opt.get('dose', 0):.0f} mg q{opt.get('tau', 0):.0f}h — "
                     f"prediktált AUC24: {self._fmt_float(opt.get('auc24'), 1)} (cél 400–600), "
                     f"trough: {self._fmt_float(opt.get('trough'), 1)}, "
                     f"peak: {self._fmt_float(opt.get('peak'), 1)}"
-                    + (
-                        f", AUC/MIC: {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')} (cél ≥400)"
-                        if opt.get("auc_mic") is not None
-                        else ""
-                    )
                 )
+                if mic_primary and opt.get("auc_mic") is not None:
+                    line += (
+                        f", AUC/MIC: {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')} (elsődleges cél ≥400)"
+                    )
+                report.append(line)
         else:
             report.append("- Nincs elérhető regimen opció.")
 
@@ -2029,16 +2037,20 @@ class MainWindow(legacy_ui.TDMMainWindow):
             suggestion = pk_result.get("suggestion", {}).get("best", {})
             dist = pk_result.get("distribution_assessment", {})
             options = pk_result.get("regimen_options", [])
+            target_assessment = pk_result.get("target_assessment", {})
+            mic_primary = target_assessment.get("target_basis") == "auc_mic_primary"
             warning = ""
             if dist.get("confidence") == "low" or dist.get("complex_kinetics_suspected"):
                 warning = "<p><i>Az opciók tájékoztató jellegűek; komplex kinetika gyanúja esetén Bayesian megközelítés előnyösebb lehet.</i></p>"
             option_lines = "".join(
                 [
                     f"<li>{opt.get('dose', 0):.0f} mg q{opt.get('tau', 0):.0f}h — "
-                    f"AUC24 {self._fmt_float(opt.get('auc24'), 1)}, trough {self._fmt_float(opt.get('trough'), 1)}, peak {self._fmt_float(opt.get('peak'), 1)}"
+                    f"AUC24 {self._fmt_float(opt.get('auc24'), 1)}"
+                    + (" (cél 400–600)" if not mic_primary else " (biztonsági guardrail)")
+                    + f", trough {self._fmt_float(opt.get('trough'), 1)}, peak {self._fmt_float(opt.get('peak'), 1)}"
                     + (
-                        f", AUC/MIC {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')}"
-                        if opt.get("auc_mic") is not None
+                        f", AUC/MIC {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')} (elsődleges cél ≥400)"
+                        if mic_primary and opt.get("auc_mic") is not None
                         else ""
                     )
                     + "</li>"
@@ -2047,6 +2059,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
             self.recommendation_browser.setHtml(
                 f"<h3>Recommendation</h3><p><b>Expozíció:</b> {pk_result.get('status', '-')}</p>"
+                + (
+                    "<p><b>PK/PD cél:</b> MIC elérhető → elsődleges cél AUC/MIC ≥400; AUC24 túlzott expozíció guardrail.</p>"
+                    if mic_primary
+                    else "<p><b>PK/PD cél:</b> MIC hiányzik → AUC24 célablak 400–600.</p>"
+                )
                 f"<p><b>Javaslat:</b> {suggestion.get('dose', 0):.0f} mg q{suggestion.get('tau', 0):.0f}h | "
                 f"AUC24 {self._fmt_float(suggestion.get('auc24'), 1)}, "
                 f"trough {self._fmt_float(suggestion.get('trough'), 1)}, "

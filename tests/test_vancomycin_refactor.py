@@ -240,6 +240,51 @@ def test_low_confidence_when_low_dose_number():
     assert result["distribution_assessment"]["confidence"] == "low"
 
 
+def test_target_assessment_uses_auc_mic_when_mic_present():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+            mic=2.0,
+        )
+    )
+    assert result["target_assessment"]["target_basis"] == "auc_mic_primary"
+    assert result["target_assessment"]["primary_label"] == "AUC/MIC >= 400"
+    assert result["target_assessment"]["auc_mic"] == result["auc_mic"]
+
+
+def test_target_assessment_falls_back_to_auc24_without_mic():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Bayesian",
+            mic=None,
+        )
+    )
+    assert result["target_assessment"]["target_basis"] == "auc24_fallback"
+    assert result["target_assessment"]["primary_label"] == "AUC24 400–600"
+
+
 def test_engine_trapezoid_override_does_not_crash_and_sets_explanation():
     result = calculate(
         VancomycinInputs(

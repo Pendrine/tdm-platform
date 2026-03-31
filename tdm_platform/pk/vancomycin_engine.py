@@ -247,6 +247,41 @@ def _build_trapezoid_assessment(distribution_assessment: dict) -> dict:
     }
 
 
+def _evaluate_pkpd_target(auc24: float, mic: float | None) -> dict:
+    if mic is not None and mic > 0:
+        auc_mic = auc24 / mic
+        primary_met = auc_mic >= 400.0
+        if not primary_met:
+            status = "Alulexpozíció"
+        elif auc24 > TARGET_AUC_HIGH:
+            status = "Túlexpozíció"
+        else:
+            status = "Célzónában"
+        return {
+            "status": status,
+            "target_basis": "auc_mic_primary",
+            "primary_label": "AUC/MIC >= 400",
+            "primary_attained": primary_met,
+            "safety_label": "AUC24 400–600 (túlzott expozíció guardrail)",
+            "safety_high": auc24 > TARGET_AUC_HIGH,
+            "auc_mic": auc_mic,
+        }
+    status = "Célzónában"
+    if auc24 < TARGET_AUC_LOW:
+        status = "Alulexpozíció"
+    elif auc24 > TARGET_AUC_HIGH:
+        status = "Túlexpozíció"
+    return {
+        "status": status,
+        "target_basis": "auc24_fallback",
+        "primary_label": "AUC24 400–600",
+        "primary_attained": TARGET_AUC_LOW <= auc24 <= TARGET_AUC_HIGH,
+        "safety_label": "AUC24 400–600",
+        "safety_high": auc24 > TARGET_AUC_HIGH,
+        "auc_mic": None,
+    }
+
+
 def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, rounding_mg: float, mic: float | None = None) -> dict:
     daily_needed = cl_l_h * target_auc
     candidates = []
@@ -262,8 +297,14 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
             seen.add(key)
             tinf = infusion_time_from_dose_hours(rounded_dose)
             pred = predict_one_compartment(rounded_dose, tau, tinf, cl_l_h, vd_l)
-            auc_delta = abs(pred.auc24 - target_auc)
-            score = auc_delta * 1.0
+            assessment = _evaluate_pkpd_target(pred.auc24, mic)
+            auc_mic = assessment["auc_mic"]
+            if mic is not None and mic > 0:
+                target_gap = max(0.0, 400.0 - (auc_mic or 0.0))
+                score = target_gap * 1.2
+            else:
+                auc_delta = abs(pred.auc24 - target_auc)
+                score = auc_delta * 1.0
             if pred.trough < TARGET_TROUGH_LOW:
                 score += (TARGET_TROUGH_LOW - pred.trough) * 6.0
             elif pred.trough > TARGET_TROUGH_HIGH:
@@ -272,9 +313,8 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
                 score += (pred.peak - 40.0) * 1.3
             if pred.auc24 > TARGET_AUC_HIGH:
                 score += (pred.auc24 - TARGET_AUC_HIGH) * 0.35
-            if TARGET_AUC_LOW <= pred.auc24 <= TARGET_AUC_HIGH:
+            if assessment["primary_attained"]:
                 score -= 12.0
-            auc_mic = (pred.auc24 / mic) if mic else None
             candidates.append({
                 "dose": rounded_dose,
                 "tau": tau,
@@ -283,6 +323,8 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
                 "peak": pred.peak,
                 "trough": pred.trough,
                 "auc_mic": auc_mic,
+                "target_basis": assessment["target_basis"],
+                "primary_target_met": assessment["primary_attained"],
                 "score": score,
                 "text": (
                     f"{rounded_dose:.0f} mg q{tau:.0f}h — prediktált AUC24: {pred.auc24:.1f}, "
@@ -322,11 +364,8 @@ def calculate(inp: VancomycinInputs) -> dict:
             print("[DEBUG][ENGINE] plot single_model label:", (plot_payload.get("single_model") or {}).get("label"))
             print("[DEBUG][ENGINE] plot len(pred_y):", len((plot_payload.get("single_model") or {}).get("pred_y", []) or []))
             print("[DEBUG][ENGINE] plot len(obs_y):", len((plot_payload.get("single_model") or {}).get("obs_y", []) or []))
-            status = "Célzónában"
-            if auc24 < TARGET_AUC_LOW:
-                status = "Alulexpozíció"
-            elif auc24 > TARGET_AUC_HIGH:
-                status = "Túlexpozíció"
+            target_assessment = _evaluate_pkpd_target(auc24, inp.mic)
+            status = target_assessment["status"]
             print(
                 "[DEBUG][ENGINE] R mapped result keys:",
                 sorted(["cl_l_h", "vd_l", "auc24", "auc_mic", "peak", "trough", "crcl"]),
@@ -347,6 +386,10 @@ def calculate(inp: VancomycinInputs) -> dict:
             distribution_assessment = _build_distribution_assessment(inp, vd_l, crcl)
             trapezoid_assessment = _build_trapezoid_assessment(distribution_assessment)
             suggestion = suggest_regimen(cl_l_h, vd_l, inp.target_auc, crcl, inp.rounding_mg, inp.mic)
+            if target_assessment["target_basis"] == "auc_mic_primary":
+                trapezoid_assessment["reason_lines"].append("MIC rendelkezésre áll: elsődleges cél az AUC/MIC >= 400; az AUC24 főként túlzott expozíció guardrail.")
+            else:
+                trapezoid_assessment["reason_lines"].append("MIC hiányában az értékelés elsődlegesen AUC24 400–600 célablak alapján történik.")
             return {
                 "status": status,
                 "crcl": crcl,
@@ -358,6 +401,7 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "half_life": 0.0,
                 "ke": 0.0,
                 "auc_mic": auc_mic,
+                "target_assessment": target_assessment,
                 "auc_mic_status": "AUC/MIC számolva." if auc_mic is not None else "AUC/MIC nem értékelhető, mert MIC nincs megadva.",
                 "suggestion": suggestion,
                 "regimen_options": suggestion.get("candidates", []),
@@ -490,11 +534,8 @@ def calculate(inp: VancomycinInputs) -> dict:
     history_summary_by_antibiotic = workflow.get("history_summary_by_antibiotic", {})
     missing_covariates = workflow.get("missing_covariates", {})
 
-    status = "Célzónában"
-    if pred_auc24 < TARGET_AUC_LOW:
-        status = "Alulexpozíció"
-    elif pred_auc24 > TARGET_AUC_HIGH:
-        status = "Túlexpozíció"
+    target_assessment = _evaluate_pkpd_target(pred_auc24, inp.mic)
+    status = target_assessment["status"]
 
     auc_mic = None if inp.mic is None else pred_auc24 / inp.mic
     auc_mic_status = "AUC/MIC nem értékelhető, mert MIC nincs megadva." if inp.mic is None else "AUC/MIC számolva."
@@ -502,6 +543,10 @@ def calculate(inp: VancomycinInputs) -> dict:
     weight_metrics = _build_weight_metrics_payload(inp, vd_used)
     distribution_assessment = _build_distribution_assessment(inp, vd_used, crcl)
     trapezoid_assessment = _build_trapezoid_assessment(distribution_assessment)
+    if target_assessment["target_basis"] == "auc_mic_primary":
+        trapezoid_assessment["reason_lines"].append("MIC rendelkezésre áll: elsődleges cél az AUC/MIC >= 400; az AUC24 főként túlzott expozíció guardrail.")
+    else:
+        trapezoid_assessment["reason_lines"].append("MIC hiányában az értékelés elsődlegesen AUC24 400–600 célablak alapján történik.")
 
     vd_prior = inp.weight_kg * (0.7 if inp.method == "Bayesian" else 0.9)
     ke_obs = math.log(inp.c1 / inp.c2) / (inp.t2_start_h - inp.t1_start_h)
@@ -520,6 +565,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         "half_life": pred_half_life,
         "ke": pred_ke,
         "auc_mic": auc_mic,
+        "target_assessment": target_assessment,
         "auc_mic_status": auc_mic_status,
         "suggestion": suggestion,
         "regimen_options": suggestion.get("candidates", []),

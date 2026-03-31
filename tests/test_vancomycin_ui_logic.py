@@ -49,6 +49,18 @@ class _DummyFitTable:
         return None
 
 
+class _DummyLineEdit:
+    def __init__(self, value: str, visible: bool = True):
+        self._value = value
+        self._visible = visible
+
+    def text(self):
+        return self._value
+
+    def isVisible(self):
+        return self._visible
+
+
 def test_collect_pk_inputs_uses_fresh_event_samples_and_selected_model():
     dummy = SimpleNamespace()
     dummy._collect_common_with_events = lambda: {
@@ -133,3 +145,29 @@ def test_classical_mode_hides_bayesian_sections_in_structured_views():
     assert "nincs Bayesian final ranker" in dummy.final_decision_browser.html
     assert "Klasszikus módban rejtve" in dummy.auto_select_browser.html
     assert dummy.fit_table.rowCount() == 0
+
+
+def test_get_active_sample_times_and_levels_prefers_clinical_fields_when_visible():
+    dummy = SimpleNamespace(
+        t1_edit=_DummyLineEdit("2.0"),
+        t2_edit=_DummyLineEdit("11.0"),
+        level1_rel_edit=_DummyLineEdit("23.5"),
+        level2_rel_edit=_DummyLineEdit("8.0"),
+        level1_clin_edit=_DummyLineEdit("30.0", visible=True),
+        level2_clin_edit=_DummyLineEdit("10.0", visible=True),
+    )
+    t1, c1, t2, c2, source = MainWindow._get_active_sample_times_and_levels(dummy)
+    assert source == "clinical"
+    assert (t1, c1, t2, c2) == ("2.0", "30.0", "11.0", "10.0")
+
+
+def test_get_active_sample_times_and_levels_falls_back_to_relative_fields():
+    dummy = SimpleNamespace(
+        t1_edit=_DummyLineEdit("2.0"),
+        t2_edit=_DummyLineEdit("11.0"),
+        level1_rel_edit=_DummyLineEdit("23.5"),
+        level2_rel_edit=_DummyLineEdit("8.0"),
+    )
+    t1, c1, t2, c2, source = MainWindow._get_active_sample_times_and_levels(dummy)
+    assert source == "relative"
+    assert (t1, c1, t2, c2) == ("2.0", "23.5", "11.0", "8.0")

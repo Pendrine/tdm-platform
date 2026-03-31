@@ -205,7 +205,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     widget.deleteLater()
 
     def _bind_input_panel_to_episode_events(self) -> None:
-        for edit in [
+        bound = [
             getattr(self, "dose_edit", None),
             getattr(self, "tinf_edit", None),
             getattr(self, "mic_edit", None),
@@ -217,13 +217,47 @@ class MainWindow(legacy_ui.TDMMainWindow):
             getattr(self, "loading_dose_edit", None),
             getattr(self, "loading_time_edit", None),
             getattr(self, "dose_count_edit", None),
-        ]:
+        ]
+        for attr_name in (
+            "level1_clin_edit",
+            "level2_clin_edit",
+            "level1_clinic_edit",
+            "level2_clinic_edit",
+            "sample1_conc_edit",
+            "sample2_conc_edit",
+        ):
+            bound.append(getattr(self, attr_name, None))
+        for edit in bound:
             if edit is None:
                 continue
             if hasattr(edit, "editingFinished"):
                 edit.editingFinished.connect(self._sync_input_panel_to_episode_events)
             if hasattr(edit, "textChanged"):
                 edit.textChanged.connect(lambda *_: self._sync_input_panel_to_episode_events())
+
+    def _get_active_sample_times_and_levels(self) -> tuple[str, str, str, str, str]:
+        t1 = self.t1_edit.text().strip() if hasattr(self, "t1_edit") else ""
+        t2 = self.t2_edit.text().strip() if hasattr(self, "t2_edit") else ""
+        clinical_candidates = [
+            ("level1_clin_edit", "level2_clin_edit"),
+            ("level1_clinic_edit", "level2_clinic_edit"),
+            ("sample1_conc_edit", "sample2_conc_edit"),
+        ]
+        for c1_name, c2_name in clinical_candidates:
+            c1_widget = getattr(self, c1_name, None)
+            c2_widget = getattr(self, c2_name, None)
+            if c1_widget is None or c2_widget is None:
+                continue
+            c1 = c1_widget.text().strip() if hasattr(c1_widget, "text") else ""
+            c2 = c2_widget.text().strip() if hasattr(c2_widget, "text") else ""
+            if hasattr(c1_widget, "isVisible") and hasattr(c2_widget, "isVisible"):
+                if c1_widget.isVisible() and c2_widget.isVisible() and (c1 or c2):
+                    return t1, c1, t2, c2, "clinical"
+            if c1 or c2:
+                return t1, c1, t2, c2, "clinical"
+        c1_rel = self.level1_rel_edit.text().strip() if hasattr(self, "level1_rel_edit") else ""
+        c2_rel = self.level2_rel_edit.text().strip() if hasattr(self, "level2_rel_edit") else ""
+        return t1, c1_rel, t2, c2_rel, "relative"
 
     def _add_loading_and_dosecount_fields(self) -> None:
         form = self.dose_edit.parentWidget().layout() if hasattr(self, "dose_edit") else None
@@ -392,11 +426,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._sync_from_table_lock = True
         row = self.episode_events_table.rowCount()
         self.episode_events_table.insertRow(row)
+        sample_t1, sample_c1, _, _, _ = self._get_active_sample_times_and_levels()
         values = {
             "loading_dose": ["0.0", "loading_dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
             "maintenance_dose": ["0.0", "maintenance_dose", self.dose_edit.text().strip() or "1000", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
             "extra_dose": ["0.0", "extra_dose", self.dose_edit.text().strip() or "500", self.tinf_edit.text().strip() or "1.0", "", "", "", ""],
-            "sample": [self.t1_edit.text().strip() or "2.0", "sample", "", "", self.level1_rel_edit.text().strip() or "20", "", "", ""],
+            "sample": [sample_t1 or "2.0", "sample", "", "", sample_c1 or "20", "", "", ""],
             "mic_result": ["0.0", "mic_result", "", "", "", self.mic_edit.text().strip() or "1.0", "", ""],
             "creatinine_result": ["0.0", "creatinine", "", "", "", "", self.scr_edit.text().strip() or "90", ""],
         }.get(event_type, ["", event_type, "", "", "", "", "", ""])
@@ -785,10 +820,15 @@ class MainWindow(legacy_ui.TDMMainWindow):
             while len(sample_rows) < 2:
                 self._append_episode_event("sample")
                 sample_rows.append(self.episode_events_table.rowCount() - 1)
-            self.episode_events_table.setItem(sample_rows[0], 0, QTableWidgetItem(self.t1_edit.text().strip()))
-            self.episode_events_table.setItem(sample_rows[0], 4, QTableWidgetItem(self.level1_rel_edit.text().strip()))
-            self.episode_events_table.setItem(sample_rows[1], 0, QTableWidgetItem(self.t2_edit.text().strip()))
-            self.episode_events_table.setItem(sample_rows[1], 4, QTableWidgetItem(self.level2_rel_edit.text().strip()))
+            sample_t1, sample_c1, sample_t2, sample_c2, sample_source = self._get_active_sample_times_and_levels()
+            self.episode_events_table.setItem(sample_rows[0], 0, QTableWidgetItem(sample_t1))
+            self.episode_events_table.setItem(sample_rows[0], 4, QTableWidgetItem(sample_c1))
+            self.episode_events_table.setItem(sample_rows[1], 0, QTableWidgetItem(sample_t2))
+            self.episode_events_table.setItem(sample_rows[1], 4, QTableWidgetItem(sample_c2))
+            print(
+                "[DEBUG][UI] sample sync source:",
+                {"source": sample_source, "t1": sample_t1, "c1": sample_c1, "t2": sample_t2, "c2": sample_c2},
+            )
             # Loading dose row (optional)
             loading_value = self.loading_dose_edit.text().strip() if hasattr(self, "loading_dose_edit") else ""
             if loading_value:
@@ -923,9 +963,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 except ValueError:
                     pass
         sample_events.sort(key=lambda x: x[0])
-        raw_ui_sample_values = [self.level1_rel_edit.text().strip(), self.level2_rel_edit.text().strip()]
+        _, raw_c1, _, raw_c2, sample_source = self._get_active_sample_times_and_levels()
+        raw_ui_sample_values = [raw_c1, raw_c2]
         normalized_sample_values = [self._safe_optional_float(v) for v in raw_ui_sample_values]
-        print("[DEBUG][UI] raw UI sample values:", raw_ui_sample_values)
+        print("[DEBUG][UI] raw UI sample values:", {"source": sample_source, "values": raw_ui_sample_values})
         print("[DEBUG][UI] normalized UI sample values:", normalized_sample_values)
         print("[DEBUG][UI] built event rows:", payload["episode_events"])
         if len(sample_events) >= 2:

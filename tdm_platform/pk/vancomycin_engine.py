@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from tdm_platform.pk.common import UMOL_PER_MGDL_CREATININE, cockcroft_gault, posterior_blend, predict_one_compartment, validate_two_point_levels
+from tdm_platform.pk.vancomycin.weights import build_weight_metrics
 from tdm_platform.pk.vancomycin.r_backend_adapter import build_r_input, map_r_output_to_plot_payload, run_r_engine
 from tdm_platform.pk.vancomycin.workflow import run_vancomycin_workflow
 
@@ -91,30 +92,207 @@ def practical_intervals_by_crcl(crcl: float) -> list[int]:
     return [48]
 
 
-def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, rounding_mg: float) -> dict:
+def _extract_sample_points(inp: VancomycinInputs) -> list[tuple[float, float]]:
+    samples: list[tuple[float, float]] = []
+    for event in inp.episode_events or []:
+        if str(event.get("event_type", "")).lower() != "sample":
+            continue
+        t_h = event.get("time_h")
+        level = event.get("level_mg_l")
+        if t_h is None or level is None:
+            continue
+        try:
+            t_val = float(t_h)
+            c_val = float(level)
+        except (TypeError, ValueError):
+            continue
+        if t_val >= 0.0 and c_val > 0.0:
+            samples.append((t_val, c_val))
+    if len(samples) < 2:
+        samples = [(float(inp.t1_start_h), float(inp.c1)), (float(inp.t2_start_h), float(inp.c2))]
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
+def _ke_consistency_label(samples: list[tuple[float, float]]) -> str | None:
+    if len(samples) < 3:
+        return "not_available"
+    (t1, c1), (t2, c2), (t3, c3) = samples[:3]
+    if c1 <= 0 or c2 <= 0 or c3 <= 0 or t2 <= t1 or t3 <= t2:
+        return "not_available"
+    ke_1 = math.log(c1 / c2) / (t2 - t1)
+    ke_2 = math.log(c2 / c3) / (t3 - t2)
+    mean_ke = max(1e-6, (ke_1 + ke_2) / 2.0)
+    rel_diff = abs(ke_1 - ke_2) / mean_ke
+    if rel_diff <= 0.25:
+        return "consistent"
+    if rel_diff <= 0.5:
+        return "borderline"
+    return "inconsistent"
+
+
+def _resolve_dose_number(inp: VancomycinInputs) -> int | None:
+    if int(inp.dose_number or 0) > 0:
+        return int(inp.dose_number)
+    inferred = 0
+    for event in inp.episode_events or []:
+        kind = str(event.get("event_type", "")).lower()
+        if "dose" in kind:
+            inferred += 1
+    return inferred or None
+
+
+def _build_weight_metrics_payload(inp: VancomycinInputs, vd_l: float) -> dict:
+    metrics = build_weight_metrics(inp.sex, inp.height_cm, inp.weight_kg)
+    return {
+        "abw_kg": metrics.tbw_kg,
+        "ibw_kg": metrics.ibw_kg,
+        "adjbw_kg": metrics.adjbw_kg,
+        "obesity_by_weight_metric": metrics.obesity_flag,
+        "vd_l_per_kg_actual": (vd_l / metrics.tbw_kg) if metrics.tbw_kg > 0 else None,
+        "vd_l_per_kg_ideal": (vd_l / metrics.ibw_kg) if metrics.ibw_kg > 0 else None,
+        "vd_l_per_kg_adjusted": (vd_l / metrics.adjbw_kg) if metrics.adjbw_kg > 0 else None,
+    }
+
+
+def _build_distribution_assessment(inp: VancomycinInputs, vd_l: float, crcl: float) -> dict:
+    weights = _build_weight_metrics_payload(inp, vd_l)
+    dose_number = _resolve_dose_number(inp)
+    early_sampling_flag = float(inp.t1_start_h) <= float(inp.tinf_h) + 1.0
+    clinical_flags = []
+    if inp.icu:
+        clinical_flags.append("icu")
+    if inp.unstable_renal:
+        clinical_flags.append("unstable_renal")
+    if inp.hematology:
+        clinical_flags.append("hematology")
+    if inp.hsct:
+        clinical_flags.append("hsct")
+    if inp.obesity or bool(weights.get("obesity_by_weight_metric")):
+        clinical_flags.append("obesity")
+    if crcl >= 130:
+        clinical_flags.append("arc")
+    ke_consistency = _ke_consistency_label(_extract_sample_points(inp))
+
+    reason_lines: list[str] = []
+    red_flags: list[str] = []
+    risk_score = 0
+    vd_act = weights.get("vd_l_per_kg_actual")
+    if vd_act is not None:
+        if vd_act < 0.5:
+            reason_lines.append("A Vd/ABW < 0.5 L/kg borderline/atípusos tartományba esik.")
+            risk_score += 1
+        elif vd_act <= 1.0:
+            reason_lines.append("A Vd/ABW 0.5–1.0 L/kg tartományban van, ez klasszikus értelmezéshez elfogadható.")
+        else:
+            red_flags.append("A Vd/ABW > 1.0 L/kg, ami tágult eloszlási tér/komplex kinetika gyanúját támogatja.")
+            risk_score += 3
+    if dose_number is not None and dose_number < 4:
+        red_flags.append("A klasszikus trapezoid megközelítés inkább legalább a 4. dózis után értelmezhető.")
+        risk_score += 2
+    elif dose_number is not None:
+        reason_lines.append("A dózisszám (>=4) támogatja a klasszikus steady-state értelmezést.")
+    if early_sampling_flag:
+        red_flags.append("A korai mintavétel az eloszlási fázis hatását erősítheti, ezért az 1-kompartmentes közelítés bizonytalanabb lehet.")
+        risk_score += 2
+    if len(clinical_flags) >= 2:
+        red_flags.append("Több klinikai komplexitási flag pozitív (pl. ICU/instabil vese/hematológia/HSCT/ARC/obesitas).")
+        risk_score += 2
+    elif len(clinical_flags) == 1:
+        reason_lines.append(f"Klinikai komplexitási flag: {clinical_flags[0]}.")
+        risk_score += 1
+    if ke_consistency == "inconsistent":
+        red_flags.append("A szakaszos eliminációs meredekségek eltérése miatt az egyetlen log-lineáris szakasz feltételezése gyengébb.")
+        risk_score += 2
+    elif ke_consistency == "borderline":
+        reason_lines.append("A szakaszos meredekségek csak részben konzisztensen támogatják az 1-kompartmentes közelítést.")
+        risk_score += 1
+
+    if risk_score >= 5:
+        confidence = "low"
+    elif risk_score >= 2:
+        confidence = "moderate"
+    else:
+        confidence = "high"
+    complex_kinetics_suspected = confidence == "low" or (vd_act is not None and vd_act > 1.0) or len(clinical_flags) >= 2
+    one_compartment_plausible = confidence != "low"
+
+    return {
+        "one_compartment_plausible": one_compartment_plausible,
+        "confidence": confidence,
+        "complex_kinetics_suspected": complex_kinetics_suspected,
+        "reason_lines": reason_lines,
+        "red_flags": red_flags,
+        "supporting_metrics": {
+            "vd_l_per_kg_actual": vd_act,
+            "vd_l_per_kg_ideal": weights.get("vd_l_per_kg_ideal"),
+            "vd_l_per_kg_adjusted": weights.get("vd_l_per_kg_adjusted"),
+            "dose_number": dose_number,
+            "early_sampling_flag": early_sampling_flag,
+            "clinical_complexity_flags": clinical_flags,
+            "ke_consistency": ke_consistency,
+        },
+    }
+
+
+def _build_trapezoid_assessment(distribution_assessment: dict) -> dict:
+    confidence = distribution_assessment.get("confidence")
+    reasons = list(distribution_assessment.get("reason_lines", []))
+    if confidence == "low":
+        reasons.append("Komplex kinetika gyanúja miatt a klasszikus trapezoid közelítés korlátozott.")
+    return {
+        "recommended": confidence != "low",
+        "confidence": confidence,
+        "reason_lines": reasons,
+    }
+
+
+def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, rounding_mg: float, mic: float | None = None) -> dict:
     daily_needed = cl_l_h * target_auc
     candidates = []
-    for tau in practical_intervals_by_crcl(crcl):
+    seen = set()
+    intervals = sorted(set(practical_intervals_by_crcl(crcl) + [12, 24]))
+    for tau in intervals:
         raw_dose = daily_needed * (tau / 24.0)
-        rounded_dose = max(rounding_mg, round(raw_dose / rounding_mg) * rounding_mg)
-        tinf = infusion_time_from_dose_hours(rounded_dose)
-        pred = predict_one_compartment(rounded_dose, tau, tinf, cl_l_h, vd_l)
-        score = abs(pred.auc24 - target_auc)
-        if pred.trough < TARGET_TROUGH_LOW:
-            score += (TARGET_TROUGH_LOW - pred.trough) * 8.0
-        elif pred.trough > TARGET_TROUGH_HIGH:
-            score += (pred.trough - TARGET_TROUGH_HIGH) * 8.0
-        candidates.append({
-            "dose": rounded_dose,
-            "tau": tau,
-            "tinf": tinf,
-            "auc24": pred.auc24,
-            "peak": pred.peak,
-            "trough": pred.trough,
-            "score": score,
-        })
+        for factor in (0.8, 1.0, 1.2):
+            rounded_dose = max(rounding_mg, round((raw_dose * factor) / rounding_mg) * rounding_mg)
+            key = (int(rounded_dose), int(tau))
+            if key in seen:
+                continue
+            seen.add(key)
+            tinf = infusion_time_from_dose_hours(rounded_dose)
+            pred = predict_one_compartment(rounded_dose, tau, tinf, cl_l_h, vd_l)
+            auc_delta = abs(pred.auc24 - target_auc)
+            score = auc_delta * 1.0
+            if pred.trough < TARGET_TROUGH_LOW:
+                score += (TARGET_TROUGH_LOW - pred.trough) * 6.0
+            elif pred.trough > TARGET_TROUGH_HIGH:
+                score += (pred.trough - TARGET_TROUGH_HIGH) * 9.0
+            if pred.peak > 40:
+                score += (pred.peak - 40.0) * 1.3
+            if pred.auc24 > TARGET_AUC_HIGH:
+                score += (pred.auc24 - TARGET_AUC_HIGH) * 0.35
+            if TARGET_AUC_LOW <= pred.auc24 <= TARGET_AUC_HIGH:
+                score -= 12.0
+            auc_mic = (pred.auc24 / mic) if mic else None
+            candidates.append({
+                "dose": rounded_dose,
+                "tau": tau,
+                "tinf": tinf,
+                "auc24": pred.auc24,
+                "peak": pred.peak,
+                "trough": pred.trough,
+                "auc_mic": auc_mic,
+                "score": score,
+                "text": (
+                    f"{rounded_dose:.0f} mg q{tau:.0f}h — prediktált AUC24: {pred.auc24:.1f}, "
+                    f"trough: {pred.trough:.1f}, peak: {pred.peak:.1f}"
+                    + (f", AUC/MIC: {auc_mic:.1f}" if auc_mic is not None else "")
+                ),
+            })
     candidates.sort(key=lambda item: item["score"])
-    return {"daily_needed": daily_needed, "best": candidates[0], "candidates": candidates}
+    top_candidates = candidates[: max(3, min(6, len(candidates)))]
+    return {"daily_needed": daily_needed, "best": top_candidates[0], "candidates": top_candidates}
 
 
 def calculate(inp: VancomycinInputs) -> dict:
@@ -165,6 +343,10 @@ def calculate(inp: VancomycinInputs) -> dict:
                     "fallback_used": False,
                 },
             )
+            weight_metrics = _build_weight_metrics_payload(inp, vd_l)
+            distribution_assessment = _build_distribution_assessment(inp, vd_l, crcl)
+            trapezoid_assessment = _build_trapezoid_assessment(distribution_assessment)
+            suggestion = suggest_regimen(cl_l_h, vd_l, inp.target_auc, crcl, inp.rounding_mg, inp.mic)
             return {
                 "status": status,
                 "crcl": crcl,
@@ -177,7 +359,11 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "ke": 0.0,
                 "auc_mic": auc_mic,
                 "auc_mic_status": "AUC/MIC számolva." if auc_mic is not None else "AUC/MIC nem értékelhető, mert MIC nincs megadva.",
-                "suggestion": {"best": {"dose": inp.dose_mg, "tau": inp.tau_h}},
+                "suggestion": suggestion,
+                "regimen_options": suggestion.get("candidates", []),
+                "weight_metrics": weight_metrics,
+                "distribution_assessment": distribution_assessment,
+                "trapezoid_assessment": trapezoid_assessment,
                 "selected_model_key": str(r_out.get("model_key") or "goti_2018"),
                 "auto_selection": {
                     "recommended_model_key": str(r_out.get("model_key") or "goti_2018"),
@@ -312,7 +498,10 @@ def calculate(inp: VancomycinInputs) -> dict:
 
     auc_mic = None if inp.mic is None else pred_auc24 / inp.mic
     auc_mic_status = "AUC/MIC nem értékelhető, mert MIC nincs megadva." if inp.mic is None else "AUC/MIC számolva."
-    suggestion = suggest_regimen(cl_used, vd_used, inp.target_auc, crcl, inp.rounding_mg)
+    suggestion = suggest_regimen(cl_used, vd_used, inp.target_auc, crcl, inp.rounding_mg, inp.mic)
+    weight_metrics = _build_weight_metrics_payload(inp, vd_used)
+    distribution_assessment = _build_distribution_assessment(inp, vd_used, crcl)
+    trapezoid_assessment = _build_trapezoid_assessment(distribution_assessment)
 
     vd_prior = inp.weight_kg * (0.7 if inp.method == "Bayesian" else 0.9)
     ke_obs = math.log(inp.c1 / inp.c2) / (inp.t2_start_h - inp.t1_start_h)
@@ -333,6 +522,10 @@ def calculate(inp: VancomycinInputs) -> dict:
         "auc_mic": auc_mic,
         "auc_mic_status": auc_mic_status,
         "suggestion": suggestion,
+        "regimen_options": suggestion.get("candidates", []),
+        "weight_metrics": weight_metrics,
+        "distribution_assessment": distribution_assessment,
+        "trapezoid_assessment": trapezoid_assessment,
         "selected_model_key": selected_model_key,
         "auto_selection": auto_selection,
         "fit_summary": fit_summary,

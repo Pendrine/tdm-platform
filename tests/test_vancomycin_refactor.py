@@ -75,6 +75,10 @@ def test_trapezoid_auc_and_auc_mic_and_suggestion():
     assert auc["auc24"] > 0
     assert result["auc_mic"] == result["auc24"]
     assert result["suggestion"]["best"]["dose"] > 0
+    assert len(result.get("regimen_options", [])) >= 3
+    assert {"auc24", "peak", "trough"}.issubset(result["regimen_options"][0].keys())
+    assert result.get("distribution_assessment")
+    assert result.get("weight_metrics")
 
 
 def test_selector_icu_obese_hsct_and_bayes_preference():
@@ -157,6 +161,83 @@ def test_engine_bayesian_path_contains_auto_select_and_fit_summary():
     assert result["auto_selection"]["recommended_model_key"]
     assert result["selected_model_key"]
     assert len(result["fit_summary"]) >= 2
+    assert result.get("distribution_assessment")
+    assert result.get("trapezoid_assessment")
+    assert result.get("weight_metrics")
+    assert len(result.get("regimen_options", [])) >= 3
+
+
+def test_distribution_thresholds_borderline_acceptable_redflag():
+    base_kwargs = dict(
+        sex="férfi",
+        age=60,
+        scr_umol=100,
+        dose_mg=1000,
+        tau_h=12,
+        tinf_h=1,
+        c1=25,
+        t1_start_h=2,
+        c2=12,
+        t2_start_h=10,
+        method="Klasszikus",
+        dose_number=5,
+        height_cm=170,
+    )
+    low = calculate(VancomycinInputs(weight_kg=250, **base_kwargs))
+    ok = calculate(VancomycinInputs(weight_kg=80, **base_kwargs))
+    high = calculate(VancomycinInputs(weight_kg=45, **base_kwargs))
+    assert low["distribution_assessment"]["supporting_metrics"]["vd_l_per_kg_actual"] < 0.5
+    assert any("borderline" in line.lower() or "atípusos" in line.lower() for line in low["distribution_assessment"]["reason_lines"])
+    assert 0.5 <= ok["distribution_assessment"]["supporting_metrics"]["vd_l_per_kg_actual"] <= 1.0
+    assert high["distribution_assessment"]["supporting_metrics"]["vd_l_per_kg_actual"] > 1.0
+    assert high["distribution_assessment"]["complex_kinetics_suspected"]
+
+
+def test_three_sample_ke_consistency_is_filled():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=24,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+            dose_number=5,
+            episode_events=[
+                {"event_type": "sample", "time_h": 2, "level_mg_l": 24},
+                {"event_type": "sample", "time_h": 6, "level_mg_l": 16},
+                {"event_type": "sample", "time_h": 10, "level_mg_l": 12},
+            ],
+        )
+    )
+    assert result["distribution_assessment"]["supporting_metrics"]["ke_consistency"] in {"consistent", "borderline", "inconsistent"}
+
+
+def test_low_confidence_when_low_dose_number():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+            dose_number=1,
+        )
+    )
+    assert result["distribution_assessment"]["confidence"] == "low"
 
 
 def test_engine_trapezoid_override_does_not_crash_and_sets_explanation():

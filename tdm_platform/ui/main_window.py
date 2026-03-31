@@ -1741,6 +1741,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
         ]
         history_summary = result.get("history_summary_by_antibiotic", {})
         history_text = ", ".join(f"{k}: {v}" for k, v in history_summary.items()) if history_summary else "nincs korábbi epizód"
+        weight_metrics = result.get("weight_metrics", {})
+        dist = result.get("distribution_assessment", {})
+        trap = result.get("trapezoid_assessment", {})
+        regimen_options = result.get("regimen_options", [])
+        support = dist.get("supporting_metrics", {})
 
         report = [
             f"VANCOMYCIN – {method}",
@@ -1751,7 +1756,25 @@ class MainWindow(legacy_ui.TDMMainWindow):
             f"- AUC/MIC: {self._fmt_float(result.get('auc_mic'), 1, na='n.a.')}",
             f"- Peak: {self._fmt_float(result.get('peak'), 1)} mg/L | Trough: {self._fmt_float(result.get('trough'), 1)} mg/L",
             f"- CL: {self._fmt_float(result.get('cl_l_h'), 2)} L/h | Vd: {self._fmt_float(result.get('vd_l'), 2)} L | CrCl: {self._fmt_float(result.get('crcl'), 1)} mL/perc",
+            "",
+            "Súly és eloszlási mutatók",
+            f"- ABW: {self._fmt_float(weight_metrics.get('abw_kg'), 1)} kg | IBW: {self._fmt_float(weight_metrics.get('ibw_kg'), 1)} kg | AdjBW: {self._fmt_float(weight_metrics.get('adjbw_kg'), 1)} kg",
+            f"- Vd/ABW: {self._fmt_float(support.get('vd_l_per_kg_actual'), 2, na='n.a.')} L/kg | "
+            f"Vd/IBW: {self._fmt_float(support.get('vd_l_per_kg_ideal'), 2, na='n.a.')} L/kg | "
+            f"Vd/AdjBW: {self._fmt_float(support.get('vd_l_per_kg_adjusted'), 2, na='n.a.')} L/kg",
+            "",
+            "Az 1-kompartmentes közelítés értékelése",
+            f"- 1-kompartmentes közelítés valószínűsége: {'igen' if dist.get('one_compartment_plausible') else 'csökkent'}",
+            f"- Confidence: {dist.get('confidence', 'n.a.')}",
+            f"- Komplex kinetika gyanúja: {'igen' if dist.get('complex_kinetics_suspected') else 'nem'}",
+            f"- Trapezoid alkalmazhatóság: {'igen' if trap.get('recommended') else 'óvatosan'}",
         ]
+        for line in dist.get("reason_lines", []):
+            report.append(f"- {line}")
+        for line in dist.get("red_flags", []):
+            report.append(f"- Figyelmeztetés: {line}")
+        if dist.get("complex_kinetics_suspected") or dist.get("confidence") == "low":
+            report.append("- Bayesian/populációs modell előnyösebb lehet.")
         if not is_classical_mode:
             active_keys = [m.key for m in active_models()]
             bayes_compare_lines = [
@@ -1797,6 +1820,24 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
         else:
             report.extend(["", "Klasszikus trapezoid számítás.", f"- Magyarázat: {result.get('final_explanation', '-')}", ""])
+        report.extend(["", "Regimen opciók"])
+        if dist.get("confidence") == "low" or dist.get("complex_kinetics_suspected"):
+            report.append("- Az alábbi klasszikus adagolási opciók tájékoztató jellegűek; komplex kinetika gyanúja esetén Bayesian megközelítés előnyösebb lehet.")
+        if regimen_options:
+            for idx, opt in enumerate(regimen_options[:5], start=1):
+                report.append(
+                    f"{idx}. {opt.get('dose', 0):.0f} mg q{opt.get('tau', 0):.0f}h — "
+                    f"prediktált AUC24: {self._fmt_float(opt.get('auc24'), 1)}, "
+                    f"trough: {self._fmt_float(opt.get('trough'), 1)}, "
+                    f"peak: {self._fmt_float(opt.get('peak'), 1)}"
+                    + (
+                        f", AUC/MIC: {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')}"
+                        if opt.get("auc_mic") is not None
+                        else ""
+                    )
+                )
+        else:
+            report.append("- Nincs elérhető regimen opció.")
 
         plot = result.get("plot") or {
             "title": "Vancomycin koncentráció-idő profil",
@@ -1883,7 +1924,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "status": result["status"],
             "primary": f"AUC24 {self._fmt_float(result.get('auc24'), 1)}",
             "secondary": f"CL {self._fmt_float(result.get('cl_l_h'), 2)} L/h",
-            "regimen": f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
+            "regimen": (
+                f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h — "
+                f"AUC24 {self._fmt_float(result['suggestion']['best'].get('auc24'), 1)}, "
+                f"trough {self._fmt_float(result['suggestion']['best'].get('trough'), 1)}, "
+                f"peak {self._fmt_float(result['suggestion']['best'].get('peak'), 1)}"
+            ),
             "status_sub": auto.get("rationale", result["status"]),
             "report": "\n".join(report),
             "pk": result,
@@ -1985,9 +2031,32 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     self.fit_table.setItem(row, col, QTableWidgetItem(str(value)))
         if hasattr(self, "recommendation_browser"):
             suggestion = pk_result.get("suggestion", {}).get("best", {})
+            dist = pk_result.get("distribution_assessment", {})
+            options = pk_result.get("regimen_options", [])
+            warning = ""
+            if dist.get("confidence") == "low" or dist.get("complex_kinetics_suspected"):
+                warning = "<p><i>Az opciók tájékoztató jellegűek; komplex kinetika gyanúja esetén Bayesian megközelítés előnyösebb lehet.</i></p>"
+            option_lines = "".join(
+                [
+                    f"<li>{opt.get('dose', 0):.0f} mg q{opt.get('tau', 0):.0f}h — "
+                    f"AUC24 {self._fmt_float(opt.get('auc24'), 1)}, trough {self._fmt_float(opt.get('trough'), 1)}, peak {self._fmt_float(opt.get('peak'), 1)}"
+                    + (
+                        f", AUC/MIC {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')}"
+                        if opt.get("auc_mic") is not None
+                        else ""
+                    )
+                    + "</li>"
+                    for opt in options[:5]
+                ]
+            )
             self.recommendation_browser.setHtml(
                 f"<h3>Recommendation</h3><p><b>Expozíció:</b> {pk_result.get('status', '-')}</p>"
-                f"<p><b>Javaslat:</b> {suggestion.get('dose', 0):.0f} mg q{suggestion.get('tau', 0):.0f}h</p>"
+                f"<p><b>Javaslat:</b> {suggestion.get('dose', 0):.0f} mg q{suggestion.get('tau', 0):.0f}h | "
+                f"AUC24 {self._fmt_float(suggestion.get('auc24'), 1)}, "
+                f"trough {self._fmt_float(suggestion.get('trough'), 1)}, "
+                f"peak {self._fmt_float(suggestion.get('peak'), 1)}</p>"
+                f"{warning}"
+                f"<p><b>Top opciók:</b></p><ol>{option_lines or '<li>nincs</li>'}</ol>"
             )
         if hasattr(self, "history_summary_browser"):
             summary = pk_result.get("history_summary_by_antibiotic", {})

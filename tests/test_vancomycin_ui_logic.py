@@ -9,9 +9,27 @@ MainWindow = main_window_module.MainWindow
 class _DummyHtmlWidget:
     def __init__(self):
         self.html = ""
+        self._cb = None
+        self.loadFinished = SimpleNamespace(connect=self._connect)
 
     def setHtml(self, html, *_args):
         self.html = html
+
+    def _connect(self, cb):
+        self._cb = cb
+
+    def emit_load_finished(self, ok: bool):
+        if self._cb:
+            self._cb(ok)
+
+    def isVisible(self):
+        return True
+
+    def size(self):
+        return SimpleNamespace(width=lambda: 800, height=lambda: 600)
+
+    def setMinimumHeight(self, _h):
+        return None
 
 
 class _DummyFitTable:
@@ -68,6 +86,31 @@ def test_render_plot_plotly_branch_generates_html_for_webview_like_widget():
     MainWindow.render_plot(dummy, spec)
     assert "Plotly.newPlot" in dummy.viz_plot_view.html
     assert "vanco_plot_chart" in dummy.viz_plot_view.html
+
+
+def test_render_plot_webview_fallback_renders_image_when_load_failed():
+    if not getattr(main_window_module, "MATPLOTLIB_UI_OK", False):
+        pytest.skip("Matplotlib UI fallback unavailable in this environment.")
+    dummy = SimpleNamespace()
+    dummy.viz_plot_view = _DummyHtmlWidget()
+    spec = {
+        "title": "Vancomycin",
+        "single_model": {
+            "label": "Hospitalized — Goti (2018)",
+            "pred_x": [0, 1, 2],
+            "pred_y": [20, 15, 10],
+            "obs_x": [1, 2],
+            "obs_y": [16, 11],
+            "dose_events": [],
+            "fit": {},
+        },
+        "model_averaging": {"overlays": []},
+        "errors": [],
+        "warnings": [],
+    }
+    MainWindow.render_plot(dummy, spec)
+    dummy.viz_plot_view.emit_load_finished(False)
+    assert "data:image/png;base64" in dummy.viz_plot_view.html
 
 
 def test_classical_mode_hides_bayesian_sections_in_structured_views():

@@ -672,6 +672,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._reset_non_vancomycin_views() if self.antibiotic_combo.currentText() != "Vancomycin" else None
 
     def collect_pk_inputs(self) -> dict:
+        if hasattr(self, "episode_events_table"):
+            self._flush_episode_table_edits()
         payload = self._collect_common_with_events()
         payload["method"] = self.method_combo.currentText() if hasattr(self, "method_combo") else "Bayesian"
         payload["selected_model_key"] = (self.model_override_combo.currentData() if hasattr(self, "model_override_combo") else None) or None
@@ -681,10 +683,22 @@ class MainWindow(legacy_ui.TDMMainWindow):
         print(f"[DEBUG][UI] collect_pk_inputs sample_count={len(sample_events)} sample_values={sample_values}")
         return payload
 
+    def _flush_episode_table_edits(self) -> None:
+        if not hasattr(self, "episode_events_table"):
+            return
+        table = self.episode_events_table
+        current = table.currentItem()
+        if current is not None:
+            table.closePersistentEditor(current)
+        table.clearFocus()
+        QApplication.processEvents()
+        print("[DEBUG][UI] episode table edits flushed.")
+
     def _collect_episode_events(self) -> list[dict]:
         events: list[dict] = []
         if not hasattr(self, "episode_events_table"):
             return events
+        print("[DEBUG][UI] event rows count before parse:", self.episode_events_table.rowCount())
         for row in range(self.episode_events_table.rowCount()):
             def txt(col: int) -> str:
                 if col == 1:
@@ -706,6 +720,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     "note": txt(7),
                 }
             )
+        parsed_sample_rows = len([e for e in events if "sample" in str(e.get("event_type", "")).lower() and str(e.get("level_mg_l", "")).strip() != ""])
+        parsed_dose_rows = len([e for e in events if "dose" in str(e.get("event_type", "")).lower() and str(e.get("dose_mg", "")).strip() != ""])
+        parsed_creatinine_rows = len([e for e in events if "creatinine" in str(e.get("event_type", "")).lower() and str(e.get("creatinine", "")).strip() != ""])
+        print(
+            "[DEBUG][UI] parsed event rows summary:",
+            {
+                "parsed_sample_rows": parsed_sample_rows,
+                "parsed_dose_rows": parsed_dose_rows,
+                "parsed_creatinine_rows": parsed_creatinine_rows,
+            },
+        )
         return events
 
     @staticmethod
@@ -1468,6 +1493,45 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 set_html_called = False
                 if hasattr(self, "viz_plot_view"):
                     view = self.viz_plot_view
+                    print("[DEBUG][PLOT] view visible:", getattr(view, "isVisible", lambda: None)())
+                    if hasattr(view, "size"):
+                        sz = view.size()
+                        print("[DEBUG][PLOT] view size:", getattr(sz, "width", lambda: None)(), getattr(sz, "height", lambda: None)())
+                    if hasattr(view, "setMinimumHeight"):
+                        view.setMinimumHeight(520)
+                    if hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
+                        def _on_load_finished(ok: bool):
+                            print("[DEBUG][PLOT] loadFinished:", ok)
+                            if ok:
+                                return
+                            if not MATPLOTLIB_UI_OK:
+                                return
+                            print("[DEBUG][PLOT] fallback branch: matplotlib_after_load_failed")
+                            try:
+                                mfig = plt.figure(figsize=(8, 4), dpi=120)
+                                ax = mfig.add_subplot(111)
+                                if pred_x and pred_y:
+                                    ax.plot(pred_x, pred_y, label=single_label, linewidth=2.0, color="#2563eb")
+                                if obs_x and obs_y:
+                                    ax.scatter(obs_x, obs_y, label="Observed", color="#16a34a")
+                                for event in dose_events:
+                                    ax.axvline(float(event.get("time", 0.0)), linestyle="--", color="gray", alpha=0.6)
+                                ax.grid(True, alpha=0.3)
+                                ax.legend(loc="best")
+                                buffer = BytesIO()
+                                mfig.tight_layout()
+                                mfig.savefig(buffer, format="png")
+                                plt.close(mfig)
+                                png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                                view.setHtml(
+                                    "<html><body style='margin:0;padding:0;'>"
+                                    f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%;height:auto;'/>"
+                                    "</body></html>"
+                                )
+                            except Exception as exc:
+                                print("[DEBUG][PLOT] fallback branch failed:", exc)
+                        view.loadFinished.connect(_on_load_finished)
+                        self._plot_load_finished_hooked = True
                     if hasattr(view, "setHtml"):
                         try:
                             view.setHtml(html, QUrl.fromLocalFile(str(Path.cwd()) + "/"))
@@ -1636,6 +1700,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 )
             else:
                 bayes_compare_lines.append(f"- Selector indoklás: {auto.get('rationale', '-')}")
+            if result.get("uncertainty_note"):
+                bayes_compare_lines.append(f"- Backend megjegyzés: {result.get('uncertainty_note')}")
             report.extend(
                 [
                     "",

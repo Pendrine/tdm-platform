@@ -290,6 +290,48 @@ def test_bayesian_selected_model_key_is_forwarded_to_r_payload():
     assert captured["selected_model_key"] == "roberts_2011"
 
 
+def test_bayesian_r_output_prototype_warning_is_exposed():
+    fake_r = {
+        "status": "ok",
+        "engine": "R_Bayesian",
+        "model_key": "okada_2018",
+        "auc24": 410.0,
+        "auc_mic": 410.0,
+        "predicted_peak": 27.0,
+        "predicted_trough": 10.0,
+        "posterior_cl_l_h": 4.1,
+        "posterior_vd_l": 55.0,
+        "curve": {"x": [0, 1], "y": [27, 20]},
+        "observed": {"x": [1], "y": [22]},
+        "dose_events": [],
+        "warnings": ["EXPERIMENTAL_BACKEND"],
+        "uncertainty_note": "prototype",
+        "errors": [],
+        "debug": {},
+    }
+    with patch("tdm_platform.pk.vancomycin_engine.run_r_engine", return_value=fake_r):
+        result = calculate(
+            VancomycinInputs(
+                sex="férfi",
+                age=60,
+                weight_kg=80,
+                scr_umol=100,
+                dose_mg=1000,
+                tau_h=12,
+                tinf_h=1,
+                c1=25,
+                t1_start_h=2,
+                c2=12,
+                t2_start_h=10,
+                method="Bayesian",
+                selected_model_key="okada_2018",
+            )
+        )
+    assert result["selected_model_key"] == "okada_2018"
+    assert result["uncertainty_note"] == "prototype"
+    assert "EXPERIMENTAL_BACKEND" in result["warnings"]
+
+
 def test_bayesian_missing_rscript_sets_fallback_reason(monkeypatch):
     monkeypatch.setenv("RSCRIPT_PATH", "/definitely/missing/Rscript.exe")
     result = calculate(

@@ -197,6 +197,7 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "warnings": r_out.get("warnings", []),
                 "errors": r_out.get("errors", []),
                 "debug": r_out.get("debug", {}),
+                "uncertainty_note": r_out.get("uncertainty_note"),
                 "engine": str(r_out.get("engine") or "R_Bayesian"),
                 "engine_source": "R_BACKEND",
                 "used_r_backend": True,

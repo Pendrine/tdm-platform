@@ -28,10 +28,20 @@ dose <- extract_dose_history(input)
 samp <- extract_sample_history(input)
 model_key <- sel$model_key
 if (is.null(model_key) || identical(model_key, '') || identical(model_key, 'trapezoid_classic')) model_key <- 'goti_2018'
+model_profiles <- list(
+  goti_2018 = list(cl = 4.5, vd = 60, k_scale = 1.00),
+  roberts_2011 = list(cl = 5.2, vd = 72, k_scale = 1.08),
+  okada_2018 = list(cl = 4.1, vd = 55, k_scale = 0.92)
+)
+profile <- model_profiles[[model_key]] %||% model_profiles[['goti_2018']]
+if (is.null(model_profiles[[model_key]])) {
+  message("[R_ENGINE] unknown model_key for profile dispatch, fallback to goti_2018 profile: ", model_key)
+}
 curve_x <- seq(0, 24, by = 0.5)
-posterior_cl <- 4.5
-posterior_vd <- 60
-curve_y <- 25 * exp(-posterior_cl/posterior_vd * curve_x)
+posterior_cl <- profile$cl
+posterior_vd <- profile$vd
+curve_y <- 25 * exp(-(posterior_cl / posterior_vd) * profile$k_scale * curve_x)
+message("[R_ENGINE] model dispatch: ", model_key, " -> cl=", posterior_cl, " vd=", posterior_vd, " k_scale=", profile$k_scale)
 obs_x <- vapply(samp$valid_samples, function(x) x$time_h, numeric(1))
 obs_y <- vapply(samp$valid_samples, function(x) x$value, numeric(1))
 out <- list(
@@ -49,12 +59,12 @@ out <- list(
   observed=list(x=as.list(obs_x), y=as.list(obs_y)),
   dose_events=dose$dose_events,
   recommendation=list(status='info', text='R backend prototípus ajánlás'),
-  uncertainty_note='Prototype MAP estimation',
-  warnings=list(),
+  uncertainty_note='Prototype MAP estimation; model profiles are simplified/experimental.',
+  warnings=list('EXPERIMENTAL_BACKEND: model-specific profile dispatch active, but full Bayesian mathematics is prototype-level.'),
   errors=if (length(obs_x) < 1) list('Nincs valid sample pont Bayesian becsléshez.') else list(),
   debug=list(
     selector_debug=sel$debug,
-    model_debug=list(model_key=model_key, prior_cl=4.5, prior_vd=60, posterior_cl=posterior_cl, posterior_vd=posterior_vd, sample_count=length(obs_x)),
+    model_debug=list(model_key=model_key, profile=profile, posterior_cl=posterior_cl, posterior_vd=posterior_vd, sample_count=length(obs_x)),
     engine_debug=list(script='run_engine.R', estimation_mode='MAP', fallback_used=FALSE),
     input_summary=list(keys=names(input)),
     dose_history_debug=dose$debug,

@@ -46,8 +46,15 @@ def normalize_event_type(raw_event_type: object) -> str:
 
 
 def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", ".")
+    if text == "":
+        return None
+    if text != str(value).strip():
+        print(f"[DEBUG][WORKFLOW] numeric normalize comma->dot: raw='{value}' normalized='{text}'")
     try:
-        return float(value)
+        return float(text)
     except (TypeError, ValueError):
         return None
 
@@ -76,7 +83,11 @@ def build_simple_episode(payload: dict) -> tuple[AntibioticEpisode, dict[str, An
     )
     events: list[EpisodeEvent] = []
     raw_events = list(payload.get("episode_events") or [])
+    print("[DEBUG][WORKFLOW] event rows count before parse:", len(raw_events))
     if raw_events:
+        parsed_sample_rows = 0
+        parsed_dose_rows = 0
+        parsed_creatinine_rows = 0
         for idx, raw in enumerate(raw_events):
             raw_event_type = str(raw.get("event_type", "")).strip()
             event_type = normalize_event_type(raw_event_type)
@@ -90,15 +101,21 @@ def build_simple_episode(payload: dict) -> tuple[AntibioticEpisode, dict[str, An
             if event_type == "sample":
                 value = _float_or_none(raw.get("level_mg_l"))
                 unit = "mg/L"
+                if value is not None:
+                    parsed_sample_rows += 1
             elif event_type == "mic_result":
                 value = _float_or_none(raw.get("mic"))
                 unit = "mg/L"
             elif event_type == "creatinine":
                 value = _float_or_none(raw.get("creatinine"))
                 unit = "µmol/L"
+                if value is not None:
+                    parsed_creatinine_rows += 1
             elif event_type in {"loading_dose", "maintenance_dose", "extra_dose"}:
                 value = _float_or_none(raw.get("dose_mg"))
                 unit = "mg"
+                if value is not None:
+                    parsed_dose_rows += 1
             else:
                 ignored_event_types.append(raw_event_type or "<empty>")
                 validation_warnings.append(f"Esemény #{idx+1}: ismeretlen event_type='{raw_event_type}', kihagyva.")
@@ -119,6 +136,14 @@ def build_simple_episode(payload: dict) -> tuple[AntibioticEpisode, dict[str, An
                     },
                 )
             )
+        print(
+            "[DEBUG][WORKFLOW] parsed rows summary:",
+            {
+                "parsed_sample_rows": parsed_sample_rows,
+                "parsed_dose_rows": parsed_dose_rows,
+                "parsed_creatinine_rows": parsed_creatinine_rows,
+            },
+        )
     else:
         events = [
             EpisodeEvent(

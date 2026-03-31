@@ -6,7 +6,7 @@ from tdm_platform.pk.vancomycin.history import find_matching_episode_history
 from tdm_platform.pk.vancomycin.model_library import ACTIVE_MODEL_KEYS, MODELS, active_models
 from tdm_platform.pk.vancomycin.recommendation_engine import build_recommendation
 from tdm_platform.pk.vancomycin.selector import auto_select_model
-from tdm_platform.pk.vancomycin.workflow import normalize_event_type, run_vancomycin_workflow
+from tdm_platform.pk.vancomycin.workflow import build_simple_episode, normalize_event_type, run_vancomycin_workflow
 from tdm_platform.pk.vancomycin.weights import build_weight_metrics, crcl_from_metrics
 from tdm_platform.pk.vancomycin_engine import VancomycinInputs, calc_auc_trapezoid, calculate
 
@@ -281,6 +281,29 @@ def test_workflow_insufficient_samples_returns_structured_error():
     assert result["plot"]["errors"]
     assert result["plot"]["obs_y"]
     assert "dose_events" in result["plot"]
+
+
+def test_workflow_parses_decimal_comma_samples_as_valid_numeric_points():
+    payload = {
+        "sex": "férfi",
+        "age": 60,
+        "height_cm": 175,
+        "weight_kg": 80,
+        "scr_umol": 100,
+        "dose_mg": 1000,
+        "tau_h": 12,
+        "tinf_h": 1,
+        "episode_events": [
+            {"event_type": "maintenance_dose", "time_h": "0", "dose_mg": "1000", "tinf_h": "1"},
+            {"event_type": "sample", "time_h": "2,0", "level_mg_l": "23,5"},
+            {"event_type": "sample", "time_h": "10,0", "level_mg_l": "8,0"},
+        ],
+    }
+    episode, summary = build_simple_episode(payload)
+    sample_values = [e.value for e in episode.events if e.event_type == "sample"]
+    assert summary["total_samples"] == 2
+    assert sample_values == [23.5, 8.0]
+    assert not any("nem numerikus érték" in msg for msg in summary["validation_warnings"])
 
 
 def test_engine_missing_mic_has_explicit_auc_mic_status():

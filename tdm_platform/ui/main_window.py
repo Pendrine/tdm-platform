@@ -1747,6 +1747,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         regimen_options = result.get("regimen_options", [])
         support = dist.get("supporting_metrics", {})
         target_assessment = result.get("target_assessment", {})
+        toxicity_assessment = result.get("toxicity_assessment", {})
         mic_primary = target_assessment.get("target_basis") == "auc_mic_primary"
 
         report = [
@@ -1782,6 +1783,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             report.append(f"- {line}")
         for line in dist.get("red_flags", []):
             report.append(f"- Figyelmeztetés: {line}")
+        if toxicity_assessment.get("toxicity_flag"):
+            report.extend(["", "Toxicitási értékelés (kiemelt)"])
+            for line in toxicity_assessment.get("message_lines", []):
+                report.append(f"- {line}")
         if dist.get("complex_kinetics_suspected") or dist.get("confidence") == "low":
             report.append("- Bayesian/populációs modell előnyösebb lehet.")
         if not is_classical_mode:
@@ -1844,6 +1849,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     line += (
                         f", AUC/MIC: {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')} (elsődleges cél ≥400)"
                     )
+                if opt.get("efficacy_toxicity_mismatch"):
+                    line += " — ⚠ hatásosság/toxicitás mismatch: magas expozíció mellett sem teljesül az elsődleges cél."
+                elif opt.get("toxicity_flag"):
+                    line += " — ⚠ fokozott toxicitási kockázat (AUC24 > 600)."
                 report.append(line)
         else:
             report.append("- Nincs elérhető regimen opció.")
@@ -2038,10 +2047,15 @@ class MainWindow(legacy_ui.TDMMainWindow):
             dist = pk_result.get("distribution_assessment", {})
             options = pk_result.get("regimen_options", [])
             target_assessment = pk_result.get("target_assessment", {})
+            toxicity_assessment = pk_result.get("toxicity_assessment", {})
             mic_primary = target_assessment.get("target_basis") == "auc_mic_primary"
             warning = ""
             if dist.get("confidence") == "low" or dist.get("complex_kinetics_suspected"):
                 warning = "<p><i>Az opciók tájékoztató jellegűek; komplex kinetika gyanúja esetén Bayesian megközelítés előnyösebb lehet.</i></p>"
+            toxicity_html = ""
+            if toxicity_assessment.get("toxicity_flag"):
+                tox_lines = "".join(f"<li>{line}</li>" for line in toxicity_assessment.get("message_lines", []))
+                toxicity_html = f"<p><b>Toxicitási figyelmeztetés:</b></p><ul>{tox_lines}</ul>"
             option_lines = "".join(
                 [
                     f"<li>{opt.get('dose', 0):.0f} mg q{opt.get('tau', 0):.0f}h — "
@@ -2070,6 +2084,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 f"AUC24 {self._fmt_float(suggestion.get('auc24'), 1)}, "
                 f"trough {self._fmt_float(suggestion.get('trough'), 1)}, "
                 f"peak {self._fmt_float(suggestion.get('peak'), 1)}</p>"
+                f"{toxicity_html}"
                 f"{warning}"
                 f"<p><b>Top opciók:</b></p><ol>{option_lines or '<li>nincs</li>'}</ol>"
                 )

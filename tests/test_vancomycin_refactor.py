@@ -285,6 +285,54 @@ def test_target_assessment_falls_back_to_auc24_without_mic():
     assert result["target_assessment"]["primary_label"] == "AUC24 400–600"
 
 
+def test_toxicity_assessment_flags_mismatch_when_auc_mic_not_met_and_auc24_high():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=2000,
+            tau_h=8,
+            tinf_h=2,
+            c1=60,
+            t1_start_h=3,
+            c2=40,
+            t2_start_h=7,
+            method="Klasszikus",
+            mic=4.0,
+        )
+    )
+    tox = result["toxicity_assessment"]
+    assert tox["auc24_overexposure"]
+    assert tox["efficacy_toxicity_mismatch"]
+    assert tox["consider_alternative_therapy"]
+    assert tox["message_lines"]
+
+
+def test_toxicity_assessment_flags_auc24_overexposure_without_mic():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=2000,
+            tau_h=8,
+            tinf_h=2,
+            c1=60,
+            t1_start_h=3,
+            c2=40,
+            t2_start_h=7,
+            method="Bayesian",
+            mic=None,
+        )
+    )
+    tox = result["toxicity_assessment"]
+    assert tox["auc24_overexposure"]
+    assert not tox["efficacy_toxicity_mismatch"]
+
+
 def test_engine_trapezoid_override_does_not_crash_and_sets_explanation():
     result = calculate(
         VancomycinInputs(

@@ -313,6 +313,8 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
                 score += (pred.peak - 40.0) * 1.3
             if pred.auc24 > TARGET_AUC_HIGH:
                 score += (pred.auc24 - TARGET_AUC_HIGH) * 0.35
+            if mic is not None and mic > 0 and not assessment["primary_attained"] and pred.auc24 > TARGET_AUC_HIGH:
+                score += 120.0
             if assessment["primary_attained"]:
                 score -= 12.0
             candidates.append({
@@ -325,6 +327,8 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
                 "auc_mic": auc_mic,
                 "target_basis": assessment["target_basis"],
                 "primary_target_met": assessment["primary_attained"],
+                "toxicity_flag": pred.auc24 > TARGET_AUC_HIGH,
+                "efficacy_toxicity_mismatch": bool(mic is not None and mic > 0 and not assessment["primary_attained"] and pred.auc24 > TARGET_AUC_HIGH),
                 "score": score,
                 "text": (
                     f"{rounded_dose:.0f} mg q{tau:.0f}h — prediktált AUC24: {pred.auc24:.1f}, "
@@ -335,6 +339,27 @@ def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, 
     candidates.sort(key=lambda item: item["score"])
     top_candidates = candidates[: max(3, min(6, len(candidates)))]
     return {"daily_needed": daily_needed, "best": top_candidates[0], "candidates": top_candidates}
+
+
+def _build_toxicity_assessment(auc24: float, mic: float | None, target_assessment: dict) -> dict:
+    auc24_over = auc24 > TARGET_AUC_HIGH
+    mic_present = mic is not None and mic > 0
+    primary_not_met = not bool(target_assessment.get("primary_attained"))
+    mismatch = bool(mic_present and primary_not_met and auc24_over)
+    lines: list[str] = []
+    if auc24_over:
+        lines.append("AUC24 > 600 mg·h/L, ami fokozott toxicitási kockázatra utal.")
+    if mismatch:
+        lines.append("A kívánt AUC/MIC célérték a jelen expozíció mellett sem teljesül megfelelően.")
+        lines.append("További vancomycin expozíciónövelés várhatóan kedvezőtlen lehet.")
+        lines.append("Más antibiotikum vagy alternatív terápiás stratégia mérlegelendő.")
+    return {
+        "toxicity_flag": auc24_over or mismatch,
+        "auc24_overexposure": auc24_over,
+        "efficacy_toxicity_mismatch": mismatch,
+        "message_lines": lines,
+        "consider_alternative_therapy": mismatch,
+    }
 
 
 def calculate(inp: VancomycinInputs) -> dict:
@@ -366,6 +391,7 @@ def calculate(inp: VancomycinInputs) -> dict:
             print("[DEBUG][ENGINE] plot len(obs_y):", len((plot_payload.get("single_model") or {}).get("obs_y", []) or []))
             target_assessment = _evaluate_pkpd_target(auc24, inp.mic)
             status = target_assessment["status"]
+            toxicity_assessment = _build_toxicity_assessment(auc24, inp.mic, target_assessment)
             print(
                 "[DEBUG][ENGINE] R mapped result keys:",
                 sorted(["cl_l_h", "vd_l", "auc24", "auc_mic", "peak", "trough", "crcl"]),
@@ -402,6 +428,7 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "ke": 0.0,
                 "auc_mic": auc_mic,
                 "target_assessment": target_assessment,
+                "toxicity_assessment": toxicity_assessment,
                 "auc_mic_status": "AUC/MIC számolva." if auc_mic is not None else "AUC/MIC nem értékelhető, mert MIC nincs megadva.",
                 "suggestion": suggestion,
                 "regimen_options": suggestion.get("candidates", []),
@@ -536,6 +563,7 @@ def calculate(inp: VancomycinInputs) -> dict:
 
     target_assessment = _evaluate_pkpd_target(pred_auc24, inp.mic)
     status = target_assessment["status"]
+    toxicity_assessment = _build_toxicity_assessment(pred_auc24, inp.mic, target_assessment)
 
     auc_mic = None if inp.mic is None else pred_auc24 / inp.mic
     auc_mic_status = "AUC/MIC nem értékelhető, mert MIC nincs megadva." if inp.mic is None else "AUC/MIC számolva."
@@ -566,6 +594,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         "ke": pred_ke,
         "auc_mic": auc_mic,
         "target_assessment": target_assessment,
+        "toxicity_assessment": toxicity_assessment,
         "auc_mic_status": auc_mic_status,
         "suggestion": suggestion,
         "regimen_options": suggestion.get("candidates", []),

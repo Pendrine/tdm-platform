@@ -607,8 +607,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             combo.clear()
             method_norm = str(method or "").strip()
             if method_norm == "Klasszikus":
+                combo.setVisible(False)
                 combo.addItem("Klasszikus trapezoid (steady-state)", "trapezoid_classic")
             else:
+                combo.setVisible(True)
                 combo.addItem("Automatikus javaslat", "")
                 for model in active_models():
                     combo.addItem(model.label, model.key)
@@ -873,7 +875,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "obesity": self._computed_obesity_flag(),
             "neutropenia": self.neutropenia_check.isChecked(),
         }
-        self._sync_input_panel_to_episode_events()
+        if hasattr(self, "episode_events_table") and self.episode_events_table.rowCount() == 0:
+            self._sync_input_panel_to_episode_events()
         if payload["height"] > 0:
             bmi = payload["weight"] / ((payload["height"] / 100.0) ** 2)
             payload["obesity"] = bmi >= 30.0
@@ -920,11 +923,26 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 except ValueError:
                     pass
         sample_events.sort(key=lambda x: x[0])
+        raw_ui_sample_values = [self.level1_rel_edit.text().strip(), self.level2_rel_edit.text().strip()]
+        normalized_sample_values = [self._safe_optional_float(v) for v in raw_ui_sample_values]
+        print("[DEBUG][UI] raw UI sample values:", raw_ui_sample_values)
+        print("[DEBUG][UI] normalized UI sample values:", normalized_sample_values)
+        print("[DEBUG][UI] built event rows:", payload["episode_events"])
         if len(sample_events) >= 2:
             payload["t1"], payload["c1"] = sample_events[0]
             payload["t2"], payload["c2"] = sample_events[1]
             if len(sample_events) >= 3:
                 payload["t3"], payload["c3"] = sample_events[2]
+            event_sample_values = [sample_events[0][1], sample_events[1][1]]
+            if normalized_sample_values[:2] != event_sample_values:
+                print(
+                    "[WARN][UI] sample binding mismatch: ui_fields_vs_event_rows",
+                    {"ui": normalized_sample_values[:2], "events": event_sample_values},
+                )
+            self.level1_rel_edit.setText(str(sample_events[0][1]))
+            self.level2_rel_edit.setText(str(sample_events[1][1]))
+            self.t1_edit.setText(str(sample_events[0][0]))
+            self.t2_edit.setText(str(sample_events[1][0]))
         if dose_events:
             last_dose = dose_events[-1]
             try:
@@ -1493,7 +1511,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 set_html_called = False
                 if hasattr(self, "viz_plot_view"):
                     view = self.viz_plot_view
+                    current_tab_name = ""
+                    if hasattr(self, "tabs") and hasattr(self.tabs, "currentWidget"):
+                        current = self.tabs.currentWidget()
+                        current_tab_name = type(current).__name__ if current is not None else ""
+                    print("[DEBUG][PLOT] current tab:", current_tab_name)
                     print("[DEBUG][PLOT] view visible:", getattr(view, "isVisible", lambda: None)())
+                    parent = getattr(view, "parentWidget", lambda: None)()
+                    print("[DEBUG][PLOT] parent visible:", getattr(parent, "isVisible", lambda: None)())
                     if hasattr(view, "size"):
                         sz = view.size()
                         print("[DEBUG][PLOT] view size:", getattr(sz, "width", lambda: None)(), getattr(sz, "height", lambda: None)())
@@ -1503,6 +1528,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         def _on_load_finished(ok: bool):
                             print("[DEBUG][PLOT] loadFinished:", ok)
                             if ok:
+                                return
+                            if not getattr(view, "isVisible", lambda: True)():
+                                print("[DEBUG][PLOT] loadFinished false while view hidden; skip fallback (lifecycle timing).")
                                 return
                             if not MATPLOTLIB_UI_OK:
                                 return
@@ -1787,8 +1815,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
             }
         plot.setdefault("metadata", {})
         if isinstance(plot["metadata"], dict):
+            active_plot_mode = "model_averaging" if hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1 else "single_model"
             plot["metadata"].update(
                 {
+                    "active_plot_mode": active_plot_mode,
+                    "active_model_key": result.get("selected_model_key"),
+                    "available_models": [m.key for m in active_models()],
+                    "is_model_averaging": bool((plot.get("model_averaging") or {}).get("overlays")),
+                    "layer_visibility": {
+                        "fit": bool(not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()),
+                        "obs": bool(not hasattr(self, "toggle_obs") or self.toggle_obs.isChecked()),
+                        "dose_events": bool(not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()),
+                        "overlay": bool(not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()),
+                    },
                     "engine_source": result.get("engine_source"),
                     "used_r_backend": result.get("used_r_backend"),
                     "fallback_used": result.get("fallback_used"),

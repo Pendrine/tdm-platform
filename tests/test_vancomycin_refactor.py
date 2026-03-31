@@ -306,6 +306,33 @@ def test_workflow_parses_decimal_comma_samples_as_valid_numeric_points():
     assert not any("nem numerikus érték" in msg for msg in summary["validation_warnings"])
 
 
+def test_workflow_uses_latest_ui_like_sample_values_without_stale_defaults():
+    payload = {
+        "sex": "férfi",
+        "age": 60,
+        "height_cm": 175,
+        "weight_kg": 80,
+        "scr_umol": 100,
+        "dose_mg": 1000,
+        "tau_h": 12,
+        "tinf_h": 1,
+        "episode_events": [
+            {"event_type": "maintenance_dose", "time_h": "0", "dose_mg": "1000", "tinf_h": "1"},
+            {"event_type": "sample", "time_h": "2", "level_mg_l": "40"},
+            {"event_type": "sample", "time_h": "10", "level_mg_l": "20"},
+        ],
+    }
+    first_episode, first_summary = build_simple_episode(payload)
+    assert first_summary["total_samples"] == 2
+    assert [e.value for e in first_episode.events if e.event_type == "sample"] == [40.0, 20.0]
+
+    payload["episode_events"][1]["level_mg_l"] = "35"
+    payload["episode_events"][2]["level_mg_l"] = "15"
+    second_episode, second_summary = build_simple_episode(payload)
+    assert second_summary["total_samples"] == 2
+    assert [e.value for e in second_episode.events if e.event_type == "sample"] == [35.0, 15.0]
+
+
 def test_engine_missing_mic_has_explicit_auc_mic_status():
     result = calculate(
         VancomycinInputs(

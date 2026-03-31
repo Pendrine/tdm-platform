@@ -1765,7 +1765,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "",
             "Az 1-kompartmentes közelítés értékelése",
             f"- 1-kompartmentes közelítés valószínűsége: {'igen' if dist.get('one_compartment_plausible') else 'csökkent'}",
-            f"- Confidence: {dist.get('confidence', 'n.a.')}",
+            f"- Az 1-kompartmentes közelítés megbízhatósága: "
+            f"{({'high': 'magas', 'moderate': 'közepes', 'low': 'alacsony'}.get(str(dist.get('confidence')), 'n.a.'))}",
             f"- Komplex kinetika gyanúja: {'igen' if dist.get('complex_kinetics_suspected') else 'nem'}",
             f"- Trapezoid alkalmazhatóság: {'igen' if trap.get('recommended') else 'óvatosan'}",
         ]
@@ -1827,11 +1828,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             for idx, opt in enumerate(regimen_options[:5], start=1):
                 report.append(
                     f"{idx}. {opt.get('dose', 0):.0f} mg q{opt.get('tau', 0):.0f}h — "
-                    f"prediktált AUC24: {self._fmt_float(opt.get('auc24'), 1)}, "
+                    f"prediktált AUC24: {self._fmt_float(opt.get('auc24'), 1)} (cél 400–600), "
                     f"trough: {self._fmt_float(opt.get('trough'), 1)}, "
                     f"peak: {self._fmt_float(opt.get('peak'), 1)}"
                     + (
-                        f", AUC/MIC: {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')}"
+                        f", AUC/MIC: {self._fmt_float(opt.get('auc_mic'), 1, na='n.a.')} (cél ≥400)"
                         if opt.get("auc_mic") is not None
                         else ""
                     )
@@ -1924,12 +1925,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "status": result["status"],
             "primary": f"AUC24 {self._fmt_float(result.get('auc24'), 1)}",
             "secondary": f"CL {self._fmt_float(result.get('cl_l_h'), 2)} L/h",
-            "regimen": (
-                f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h — "
-                f"AUC24 {self._fmt_float(result['suggestion']['best'].get('auc24'), 1)}, "
-                f"trough {self._fmt_float(result['suggestion']['best'].get('trough'), 1)}, "
-                f"peak {self._fmt_float(result['suggestion']['best'].get('peak'), 1)}"
-            ),
+            "regimen": f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
             "status_sub": auto.get("rationale", result["status"]),
             "report": "\n".join(report),
             "pk": result,

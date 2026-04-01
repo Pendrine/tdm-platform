@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QDateTime, QTime, QUrl
+from PySide6.QtCore import QDate, QDateTime, QTime, QTimer, QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -577,8 +577,25 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.toggle_dose_events = QCheckBox("Dose events")
         self.toggle_overlay = QCheckBox("Overlay modellek")
         self.toggle_overlay.setChecked(True)
+        self.toggle_current_samples = QCheckBox("Aktuális epizód mintapontjai")
+        self.toggle_current_samples.setChecked(True)
+        self.toggle_history_samples = QCheckBox("Korábbi azonos beteg mintapontjai")
+        self.toggle_regimen_conc = QCheckBox("Ajánlott sémák prediktált koncentrációi")
+        self.toggle_regimen_auc = QCheckBox("Ajánlott sémák prediktált AUC overlay")
+        self.toggle_dose_annotations = QCheckBox("Dózisesemény annotációk")
         top.addWidget(self.view_combo)
-        for chk in [self.toggle_obs, self.toggle_fit, self.toggle_projection, self.toggle_dose_events, self.toggle_overlay]:
+        for chk in [
+            self.toggle_obs,
+            self.toggle_fit,
+            self.toggle_projection,
+            self.toggle_dose_events,
+            self.toggle_overlay,
+            self.toggle_current_samples,
+            self.toggle_history_samples,
+            self.toggle_regimen_conc,
+            self.toggle_regimen_auc,
+            self.toggle_dose_annotations,
+        ]:
             top.addWidget(chk)
         top.addStretch(1)
         layout.addLayout(top)
@@ -588,6 +605,20 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.viz_mode_tabs.addTab(self.viz_single, "Single model")
         self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
         self.viz_mode_tabs.currentChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
+        self.view_combo.currentIndexChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
+        for chk in [
+            self.toggle_obs,
+            self.toggle_fit,
+            self.toggle_projection,
+            self.toggle_dose_events,
+            self.toggle_overlay,
+            self.toggle_current_samples,
+            self.toggle_history_samples,
+            self.toggle_regimen_conc,
+            self.toggle_regimen_auc,
+            self.toggle_dose_annotations,
+        ]:
+            chk.stateChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
         layout.addWidget(self.viz_mode_tabs)
         if hasattr(self, "plot_view") and self.plot_view is not None:
             self.viz_plot_view = self.plot_view
@@ -597,6 +628,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.viz_plot_view.setMinimumHeight(460)
         self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
         layout.addWidget(self.viz_plot_view, 1)
+        if hasattr(self, "tabs"):
+            try:
+                self.tabs.currentChanged.connect(self._on_main_tabs_changed)
+            except Exception:
+                pass
         self.model_avg_table = QTableWidget(0, 6)
         self.model_avg_table.setHorizontalHeaderLabels(["Modell", "Súly", "RMSE", "MAE", "AUC24", "AUC/MIC"])
         layout.addWidget(self.model_avg_table)
@@ -1435,254 +1471,181 @@ class MainWindow(legacy_ui.TDMMainWindow):
         QApplication.instance().quit()
 
 
+    def _on_main_tabs_changed(self, _idx: int) -> None:
+        pending = getattr(self, "_pending_plot_spec", None)
+        if pending is not None:
+            print("[DEBUG][PLOT] main tab became visible; rendering deferred plot.")
+            self._pending_plot_spec = None
+            self.render_plot(pending)
+
+    def _is_plot_view_visible(self) -> bool:
+        view = getattr(self, "viz_plot_view", None)
+        if view is None:
+            return False
+        return bool(getattr(view, "isVisible", lambda: True)())
+
+    def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
+        points: list[tuple[float, float, str]] = []
+        patient_id = str((self._last_pk_payload or {}).get("patient_id", "")).strip()
+        if not patient_id:
+            return points
+        for row in self.history_data or []:
+            if str(row.get("drug", "")).lower() != "vancomycin":
+                continue
+            if str(row.get("patient_id", "")).strip() != patient_id:
+                continue
+            events = (row.get("inputs") or {}).get("episode_events") or []
+            ts = str(row.get("timestamp", ""))
+            method = str(row.get("method", ""))
+            for ev in events:
+                if "sample" not in str(ev.get("event_type", "")).lower():
+                    continue
+                t_h = self._safe_optional_float(ev.get("time_h"))
+                c = self._safe_optional_float(ev.get("level_mg_l"))
+                if t_h is None or c is None:
+                    continue
+                points.append((t_h, c, f"{ts} | {method}"))
+        return points
+
+    def _build_dose_event_traces(self, fig: go.Figure, dose_events: list[dict]) -> None:
+        color_map = {"loading_dose": "#f59e0b", "maintenance_dose": "#2563eb", "extra_dose": "#ef4444"}
+        for ev in dose_events:
+            t = float(ev.get("time", 0.0))
+            et = str(ev.get("event_type", "maintenance_dose")).lower()
+            color = color_map.get(et, "#64748b")
+            fig.add_vline(x=t, line_dash="dash", line_color=color, opacity=0.7)
+            if hasattr(self, "toggle_dose_annotations") and self.toggle_dose_annotations.isChecked():
+                fig.add_annotation(
+                    x=t,
+                    y=1.02,
+                    xref="x",
+                    yref="paper",
+                    text=f"{et}<br>{ev.get('dose','-')} mg",
+                    showarrow=False,
+                    font=dict(size=9, color=color),
+                )
+
+    def _build_regimen_overlay_traces(self, fig: go.Figure, view_mode: str) -> None:
+        if not self.results or not self.results.get("pk"):
+            return
+        pk = self.results["pk"]
+        if not (hasattr(self, "toggle_regimen_conc") and self.toggle_regimen_conc.isChecked()):
+            return
+        options = (pk.get("regimen_options") or [])[:3]
+        for idx, opt in enumerate(options):
+            tau = float(opt.get("tau") or 12.0)
+            peak = float(opt.get("peak") or 0.0)
+            trough = float(opt.get("trough") or 0.0)
+            x = [0.0, tau / 2.0, tau]
+            y = [peak, (peak + trough) / 2.0, trough]
+            if view_mode == "auc":
+                if not (hasattr(self, "toggle_regimen_auc") and self.toggle_regimen_auc.isChecked()):
+                    continue
+                fig.add_trace(go.Scatter(x=x, y=y, fill="tozeroy", mode="lines", opacity=0.15 if idx else 0.3, name=f"Regimen AUC {idx+1}"))
+            else:
+                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", opacity=0.35 if idx else 0.8, name=f"Regimen {idx+1}: {opt.get('dose',0):.0f} mg q{tau:.0f}h"))
+
     def render_plot(self, spec: dict):
         self._last_plot_spec = spec or {}
-        print("[DEBUG][PLOT] keys:", list((spec or {}).keys()))
-        print("[DEBUG][PLOT] single_model:", (spec or {}).get("single_model"))
-        print("[DEBUG][PLOT] len current_y:", len((spec or {}).get("current_y", []) or []))
-        print("[DEBUG][PLOT] len obs_y:", len((spec or {}).get("obs_y", []) or []))
-        print("[DEBUG][PLOT] errors:", (spec or {}).get("errors", []))
-        print("[DEBUG][PLOT] warnings:", (spec or {}).get("warnings", []))
+        if not self._is_plot_view_visible():
+            print("[DEBUG][PLOT] deferred render: view hidden.")
+            self._pending_plot_spec = spec or {}
+            QTimer.singleShot(200, lambda: self._on_main_tabs_changed(-1))
+            return
         single = spec.get("single_model") or {}
         avg = spec.get("model_averaging") or {}
-        errors = spec.get("errors", []) or []
-        warnings = spec.get("warnings", []) or []
         pred_x = list(single.get("pred_x") or spec.get("current_x", []) or [])
         pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
         obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
         obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
         dose_events = list(single.get("dose_events") or spec.get("dose_events", []) or [])
-        single_label = str(single.get("label") or "Single model")
-        print("[DEBUG][PLOT] single_model label:", single_label)
-        print("[DEBUG][PLOT] len(pred_y):", len(pred_y))
-        print("[DEBUG][PLOT] len(obs_y):", len(obs_y))
-        if single and not errors:
-            fig = go.Figure()
-            show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
-            if show_averaging and avg and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
-                for overlay in avg.get("overlays", []):
-                    fig.add_trace(
-                        go.Scatter(
-                            x=overlay["x"],
-                            y=overlay["y"],
-                            mode="lines",
-                            name=f"Avg {overlay['label']} (w={overlay['weight']:.2f})",
-                            line=dict(width=1, dash="dot"),
-                            opacity=0.6,
-                        )
-                    )
-            if (not show_averaging) and (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()) and pred_x and pred_y:
-                fig.add_trace(go.Scatter(x=pred_x, y=pred_y, mode="lines", name=f"Single: {single_label}"))
-            if not hasattr(self, "toggle_obs") or self.toggle_obs.isChecked():
-                if obs_x and obs_y:
-                    fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Observed", marker=dict(size=10, color="green")))
-            if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
-                for event in dose_events:
-                    fig.add_vline(x=float(event.get("time", 0.0)), line_dash="dash", line_color="gray")
-            fig.update_layout(
-                title=f"{spec.get('title', 'Vancomycin')} — Single model + Model averaging",
-                xaxis_title="Óra",
-                yaxis_title="Koncentráció (mg/L)",
-                template="plotly_white",
-                margin=dict(l=30, r=30, t=50, b=30),
-            )
-            widget = getattr(self, "viz_plot_view", None)
-            print("[DEBUG][PLOT] render widget:", type(widget).__name__ if widget is not None else "None")
-            if isinstance(widget, QTextBrowser):
-                print("[DEBUG][PLOT] render branch: text_browser")
-                html = ""
-                if MATPLOTLIB_UI_OK and (pred_x and pred_y or obs_x and obs_y):
-                    try:
-                        mfig = plt.figure(figsize=(8, 4), dpi=120)
-                        ax = mfig.add_subplot(111)
-                        if pred_x and pred_y:
-                            ax.plot(pred_x, pred_y, label=single_label, linewidth=2.0, color="#2563eb")
-                        if obs_x and obs_y:
-                            ax.scatter(obs_x, obs_y, label="Observed", color="#16a34a")
-                        for event in dose_events:
-                            ax.axvline(float(event.get("time", 0.0)), linestyle="--", color="gray", alpha=0.6)
-                        ax.set_xlabel("Óra")
-                        ax.set_ylabel("Koncentráció (mg/L)")
-                        ax.set_title(spec.get("title", "Vancomycin"))
-                        ax.grid(True, alpha=0.3)
-                        ax.legend(loc="best")
-                        buffer = BytesIO()
-                        mfig.tight_layout()
-                        mfig.savefig(buffer, format="png")
-                        plt.close(mfig)
-                        png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-                        html = (
-                            f"<h3>{spec.get('title', 'Vancomycin')}</h3>"
-                            f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%; height:auto;'/>"
-                        )
-                        print("[DEBUG][PLOT] render branch: matplotlib_png")
-                    except Exception as exc:
-                        print("[DEBUG][PLOT] render branch: matplotlib_png_failed", exc)
-                if not html:
-                    print("[DEBUG][PLOT] render branch: text_fallback")
-                    lines = [f"<h3>{spec.get('title', 'Vancomycin')}</h3>"]
-                    if obs_x and obs_y:
-                        lines.append("<p><b>Observed pontok:</b></p><ul>" + "".join(f"<li>t={x}h, C={y} mg/L</li>" for x, y in zip(obs_x, obs_y)) + "</ul>")
-                    if dose_events:
-                        lines.append(
-                            "<p><b>Dózisesemények:</b></p><ul>"
-                            + "".join(f"<li>{str(e.get('event_type','dose'))}: t={e.get('time', 0)}h, dose={e.get('dose', '-')}</li>" for e in dose_events)
-                            + "</ul>"
-                        )
-                    if pred_y:
-                        lines.append(f"<p>Fitted pontok száma: {len(pred_y)}</p>")
-                    html = "".join(lines)
-                widget.setHtml(html)
-            else:
-                print("[DEBUG][PLOT] render branch: plotly_html")
-                chart_div_id = "vanco_plot_chart"
-                plot_div = pio.to_html(
-                    fig,
-                    include_plotlyjs="inline",
-                    full_html=False,
-                    default_height="520px",
-                    default_width="100%",
-                    div_id=chart_div_id,
-                )
-                html = (
-                    "<html><head><meta charset='utf-8'></head>"
-                    "<body style='margin:0; padding:0; overflow:hidden;'>"
-                    f"{plot_div}</body></html>"
-                )
-                print("[DEBUG][PLOT] generated_html_length:", len(html))
-                print("[DEBUG][PLOT] html contains Plotly.newPlot?:", "Plotly.newPlot" in html)
-                print("[DEBUG][PLOT] chart div id:", chart_div_id)
-                set_html_called = False
-                if hasattr(self, "viz_plot_view"):
-                    view = self.viz_plot_view
-                    current_tab_name = ""
-                    if hasattr(self, "tabs") and hasattr(self.tabs, "currentWidget"):
-                        current = self.tabs.currentWidget()
-                        current_tab_name = type(current).__name__ if current is not None else ""
-                    print("[DEBUG][PLOT] current tab:", current_tab_name)
-                    print("[DEBUG][PLOT] view visible:", getattr(view, "isVisible", lambda: None)())
-                    parent = getattr(view, "parentWidget", lambda: None)()
-                    print("[DEBUG][PLOT] parent visible:", getattr(parent, "isVisible", lambda: None)())
-                    if hasattr(view, "size"):
-                        sz = view.size()
-                        print("[DEBUG][PLOT] view size:", getattr(sz, "width", lambda: None)(), getattr(sz, "height", lambda: None)())
-                    if hasattr(view, "setMinimumHeight"):
-                        view.setMinimumHeight(520)
-                    if hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
-                        def _on_load_finished(ok: bool):
-                            print("[DEBUG][PLOT] loadFinished:", ok)
-                            if ok:
-                                return
-                            if not getattr(view, "isVisible", lambda: True)():
-                                print("[DEBUG][PLOT] loadFinished false while view hidden; skip fallback (lifecycle timing).")
-                                return
-                            if not MATPLOTLIB_UI_OK:
-                                return
-                            print("[DEBUG][PLOT] fallback branch: matplotlib_after_load_failed")
-                            try:
-                                mfig = plt.figure(figsize=(8, 4), dpi=120)
-                                ax = mfig.add_subplot(111)
-                                if pred_x and pred_y:
-                                    ax.plot(pred_x, pred_y, label=single_label, linewidth=2.0, color="#2563eb")
-                                if obs_x and obs_y:
-                                    ax.scatter(obs_x, obs_y, label="Observed", color="#16a34a")
-                                for event in dose_events:
-                                    ax.axvline(float(event.get("time", 0.0)), linestyle="--", color="gray", alpha=0.6)
-                                ax.grid(True, alpha=0.3)
-                                ax.legend(loc="best")
-                                buffer = BytesIO()
-                                mfig.tight_layout()
-                                mfig.savefig(buffer, format="png")
-                                plt.close(mfig)
-                                png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-                                view.setHtml(
-                                    "<html><body style='margin:0;padding:0;'>"
-                                    f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%;height:auto;'/>"
-                                    "</body></html>"
-                                )
-                            except Exception as exc:
-                                print("[DEBUG][PLOT] fallback branch failed:", exc)
-                        view.loadFinished.connect(_on_load_finished)
-                        self._plot_load_finished_hooked = True
-                    if hasattr(view, "setHtml"):
-                        try:
-                            view.setHtml(html, QUrl.fromLocalFile(str(Path.cwd()) + "/"))
-                        except TypeError:
-                            view.setHtml(html)
-                        set_html_called = True
-                print("[DEBUG][PLOT] setHtml called?:", set_html_called)
-            if hasattr(self, "viz_single"):
-                fit = single.get("fit", {})
-                rmse = fit.get("rmse")
-                mae = fit.get("mae")
-                self.viz_single.setHtml(
-                    f"<h3>{single_label}</h3><p>RMSE: {rmse if rmse is not None else '-'} | MAE: {mae if mae is not None else '-'}</p>"
-                )
-            if hasattr(self, "viz_averaging"):
-                self.viz_averaging.setHtml(
-                    "<br/>".join(
-                        [f"{overlay['label']}: w={overlay['weight']:.3f}, RMSE={overlay['rmse']:.3f}, MAE={overlay['mae']:.3f}" for overlay in avg.get("overlays", [])]
-                    )
-                    or "Nincs model averaging adat."
-                )
-            if hasattr(self, "model_avg_table"):
-                self.model_avg_table.setRowCount(0)
-                for overlay in avg.get("overlays", []):
-                    row = self.model_avg_table.rowCount()
-                    self.model_avg_table.insertRow(row)
-                    values = [
-                        overlay["label"],
-                        f"{overlay['weight']:.3f}",
-                        f"{overlay['rmse']:.3f}",
-                        f"{overlay['mae']:.3f}",
-                        f"{overlay.get('auc24', '-')}",
-                        f"{overlay.get('auc_mic', '-')}",
-                    ]
-                    for col, value in enumerate(values):
-                        self.model_avg_table.setItem(row, col, QTableWidgetItem(str(value)))
+        show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
+        view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"
+        fig = go.Figure()
+        if show_averaging and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
+            for overlay in avg.get("overlays", []):
+                fig.add_trace(go.Scatter(x=overlay.get("x", []), y=overlay.get("y", []), mode="lines", name=f"Avg {overlay.get('label','model')}", opacity=0.55))
+        elif (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()) and pred_x and pred_y:
+            fig.add_trace(go.Scatter(x=pred_x, y=pred_y, mode="lines", name=str(single.get("label") or "Fitted"), line=dict(width=2.5)))
+        if (not hasattr(self, "toggle_current_samples") or self.toggle_current_samples.isChecked()) and obs_x and obs_y:
+            fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Aktuális observed", marker=dict(size=10, color="#16a34a")))
+        if hasattr(self, "toggle_history_samples") and self.toggle_history_samples.isChecked():
+            hp = self._collect_history_sample_points()
+            if hp:
+                fig.add_trace(go.Scatter(x=[p[0] for p in hp], y=[p[1] for p in hp], mode="markers", name="Korábbi beteg minták", marker=dict(size=8, color="#a855f7", symbol="diamond"), text=[p[2] for p in hp], hovertemplate="%{text}<br>t=%{x}h, C=%{y}<extra></extra>"))
+        if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
+            self._build_dose_event_traces(fig, dose_events)
+        if view_mode == "auc" and pred_x and pred_y:
+            fig.add_trace(go.Scatter(x=pred_x, y=pred_y, fill="tozeroy", mode="lines", opacity=0.25, name="AUC area"))
+        self._build_regimen_overlay_traces(fig, view_mode)
+        mic_value = (self.results or {}).get("pk", {}).get("auc_mic")
+        subtitle = f"AUC/MIC: {self._fmt_float(mic_value, 1, na='n.a.')}" if mic_value is not None else "MIC nincs megadva"
+        fig.update_layout(
+            title=f"{spec.get('title', 'Vancomycin PK timeline')} — {'Model averaging' if show_averaging else 'Single model'}<br><sup>{subtitle}</sup>",
+            xaxis_title="Idő (óra)",
+            yaxis_title="Koncentráció (mg/L)" if view_mode == "concentration" else "Expozíció (relatív)",
+            template="plotly_white",
+            margin=dict(l=20, r=20, t=70, b=30),
+            height=620,
+        )
+        view = getattr(self, "viz_plot_view", None)
+        if view is None or not hasattr(view, "setHtml"):
             return
-        fallback_obs_x = spec.get("obs_x", []) or []
-        fallback_obs_y = spec.get("obs_y", []) or []
-        fallback_pred_x = spec.get("current_x", []) or []
-        fallback_pred_y = spec.get("current_y", []) or []
-        fallback_dose_events = []
-        if isinstance(single, dict):
-            fallback_dose_events = single.get("dose_events", []) or []
-        if not fallback_dose_events:
-            fallback_dose_events = spec.get("dose_events", []) or []
-        if (fallback_pred_x and fallback_pred_y) or (fallback_obs_x and fallback_obs_y):
-            print("[DEBUG][PLOT] render branch: fallback_plotly")
-            fig = go.Figure()
-            if fallback_pred_x and fallback_pred_y:
-                fig.add_trace(go.Scatter(x=fallback_pred_x, y=fallback_pred_y, mode="lines", name="Fitted/legacy"))
-            if fallback_obs_x and fallback_obs_y:
-                fig.add_trace(go.Scatter(x=fallback_obs_x, y=fallback_obs_y, mode="markers", name="Observed", marker=dict(size=10, color="green")))
-            for event in fallback_dose_events:
-                fig.add_vline(x=float(event.get("time", 0.0)), line_dash="dash", line_color="gray")
-            fig.update_layout(title=spec.get("title", "Vancomycin plot"), xaxis_title="Óra", yaxis_title="Koncentráció (mg/L)", template="plotly_white")
-            html = pio.to_html(fig, include_plotlyjs=True, full_html=False)
-            if hasattr(self, "viz_plot_view"):
-                self.viz_plot_view.setHtml(html)
-        lines = ["<h3>Nincs megjeleníthető modellillesztési eredmény</h3>"]
-        print("[DEBUG][PLOT] render branch: fallback_text")
-        if fallback_obs_x and fallback_obs_y:
-            obs_rows = "".join(f"<li>t={x}h, C={y} mg/L</li>" for x, y in zip(fallback_obs_x, fallback_obs_y))
-            lines.append(f"<p><b>Observed pontok:</b></p><ul>{obs_rows}</ul>")
-        if fallback_dose_events:
-            dose_rows = "".join(
-                f"<li>{str(e.get('event_type','dose'))}: t={e.get('time', 0)}h, dose={e.get('dose', '-')}</li>"
-                for e in fallback_dose_events
-            )
-            lines.append(f"<p><b>Dózisesemények:</b></p><ul>{dose_rows}</ul>")
-        if errors:
-            err_rows = "".join(f"<li>{err}</li>" for err in errors)
-            lines.append(f"<p><b>Hibák:</b></p><ul>{err_rows}</ul>")
-        if warnings:
-            warn_rows = "".join(f"<li>{warn}</li>" for warn in warnings)
-            lines.append(f"<p><b>Figyelmeztetések:</b></p><ul>{warn_rows}</ul>")
-        if hasattr(self, "viz_plot_view"):
-            self.viz_plot_view.setHtml("".join(lines))
-        return
+        html = pio.to_html(fig, include_plotlyjs="inline", full_html=False, default_height="620px", default_width="100%", div_id="vanco_plot_chart")
+        try:
+            view.setHtml(f"<html><body style='margin:0'>{html}</body></html>", QUrl.fromLocalFile(str(Path.cwd()) + "/"))
+        except TypeError:
+            view.setHtml(f"<html><body style='margin:0'>{html}</body></html>")
+        if hasattr(self, "viz_single"):
+            self.viz_single.setHtml(f"<h3>{single.get('label','Single model')}</h3><p>Trace-ek: {len(fig.data)}</p>")
+        if hasattr(self, "viz_averaging"):
+            self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
+        if hasattr(self, "model_avg_table"):
+            self.model_avg_table.setRowCount(0)
+            for overlay in avg.get("overlays", []):
+                row = self.model_avg_table.rowCount()
+                self.model_avg_table.insertRow(row)
+                vals = [overlay.get("label", "-"), f"{overlay.get('weight', 0):.3f}", f"{overlay.get('rmse', 0):.3f}", f"{overlay.get('mae', 0):.3f}", f"{overlay.get('auc24', '-')}", f"{overlay.get('auc_mic', '-')}"]
+                for col, value in enumerate(vals):
+                    self.model_avg_table.setItem(row, col, QTableWidgetItem(str(value)))
+        if hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
+            def _on_load_finished(ok: bool):
+                print("[DEBUG][PLOT] loadFinished:", ok)
+                if ok:
+                    return
+                if not self._is_plot_view_visible():
+                    print("[DEBUG][PLOT] loadFinished false while hidden: keep deferred/no fallback.")
+                    return
+                if getattr(self, "_plot_retry_done", False):
+                    if MATPLOTLIB_UI_OK and pred_x and pred_y:
+                        print("[DEBUG][PLOT] fallback reason: visible view + retry failed.")
+                        try:
+                            mfig = plt.figure(figsize=(8, 4), dpi=120)
+                            ax = mfig.add_subplot(111)
+                            ax.plot(pred_x, pred_y, label="Fitted", linewidth=2.0, color="#2563eb")
+                            if obs_x and obs_y:
+                                ax.scatter(obs_x, obs_y, label="Observed", color="#16a34a")
+                            for event in dose_events:
+                                ax.axvline(float(event.get("time", 0.0)), linestyle="--", color="gray", alpha=0.6)
+                            ax.grid(True, alpha=0.3)
+                            ax.legend(loc="best")
+                            buffer = BytesIO()
+                            mfig.tight_layout()
+                            mfig.savefig(buffer, format="png")
+                            plt.close(mfig)
+                            png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                            view.setHtml(
+                                "<html><body style='margin:0;padding:0;'>"
+                                f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%;height:auto;'/>"
+                                "</body></html>"
+                            )
+                        except Exception as exc:
+                            print("[DEBUG][PLOT] matplotlib fallback failed:", exc)
+                    return
+                self._plot_retry_done = True
+                QTimer.singleShot(120, lambda: self.render_plot(self._last_plot_spec or {}))
+            view.loadFinished.connect(_on_load_finished)
+            self._plot_load_finished_hooked = True
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:
         print(f"[DEBUG][UI] calc_vancomycin input_method={method}")

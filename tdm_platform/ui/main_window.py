@@ -598,17 +598,28 @@ class MainWindow(legacy_ui.TDMMainWindow):
         top.addStretch(1)
         layout.addLayout(top)
         main_row = QSplitter(Qt.Horizontal, self.plot_tab)
-        left_panel = QWidget()
+        left_panel = QWidget(self.plot_tab)
         left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        if hasattr(self, "plot_view") and isinstance(self.plot_view, QWebEngineView):
+            self.viz_plot_view = self.plot_view
+            self.viz_plot_view.setVisible(True)
+        else:
+            self.viz_plot_view = QWebEngineView(self.plot_tab)
+        print("[DEBUG][PLOT] viz_plot_view widget class:", type(self.viz_plot_view).__name__)
+        self.viz_plot_view.setMinimumHeight(520)
+        self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
+        left_layout.addWidget(self.viz_plot_view, 1)
+        main_row.addWidget(left_panel)
+        right_panel = QWidget(self.plot_tab)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         self.viz_mode_tabs = QTabWidget()
         self.viz_single = QTextBrowser()
         self.viz_averaging = QTextBrowser()
         self.viz_mode_tabs.addTab(self.viz_single, "Single model")
         self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
-        left_layout.addWidget(self.viz_mode_tabs)
-        main_row.addWidget(left_panel)
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
+        right_layout.addWidget(self.viz_mode_tabs)
         flags_box = QGroupBox("Vizualizációs rétegek")
         flags_grid = QGridLayout(flags_box)
         flag_widgets = [
@@ -626,13 +637,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
         ]
         for idx, chk in enumerate(flag_widgets):
             flags_grid.addWidget(chk, idx // 2, idx % 2)
-        right_layout.addWidget(flags_box)
+        right_layout.addWidget(flags_box, 0)
         self.model_avg_table = QTableWidget(0, 6)
         self.model_avg_table.setHorizontalHeaderLabels(["Modell", "Súly", "RMSE", "MAE", "AUC24", "AUC/MIC"])
+        self.model_avg_table.setMinimumHeight(220)
         right_layout.addWidget(self.model_avg_table, 1)
-        main_row.addWidget(right_panel)
-        main_row.setSizes([760, 420])
-        layout.addWidget(main_row)
+        right_scroll = QScrollArea(self.plot_tab)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        right_scroll.setWidget(right_panel)
+        main_row.addWidget(right_scroll)
+        main_row.setSizes([920, 420])
+        layout.addWidget(main_row, 1)
         self.viz_mode_tabs.currentChanged.connect(lambda *_: self._schedule_render("tab_changed"))
         self.view_combo.currentIndexChanged.connect(lambda *_: self._schedule_render("view_combo"))
         for chk in [
@@ -651,15 +668,6 @@ class MainWindow(legacy_ui.TDMMainWindow):
             chk.stateChanged.connect(lambda *_args, name=chk.text(): self._schedule_render(f"toggle:{name}"))
         self.plotly_rerender_btn.clicked.connect(lambda *_: self._schedule_render("manual_plotly_rerender", force=True))
         self.matplotlib_fallback_btn.clicked.connect(self._render_manual_matplotlib_fallback)
-        if hasattr(self, "plot_view") and isinstance(self.plot_view, QWebEngineView):
-            self.viz_plot_view = self.plot_view
-            self.viz_plot_view.setVisible(True)
-        else:
-            self.viz_plot_view = QWebEngineView(self.plot_tab)
-        print("[DEBUG][PLOT] viz_plot_view widget class:", type(self.viz_plot_view).__name__)
-        self.viz_plot_view.setMinimumHeight(460)
-        self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
-        layout.addWidget(self.viz_plot_view, 1)
         if hasattr(self, "tabs"):
             try:
                 self.tabs.currentChanged.connect(self._on_main_tabs_changed)

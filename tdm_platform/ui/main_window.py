@@ -1495,6 +1495,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return True
         return self.tabs.currentWidget() is self.plot_tab
 
+    def _update_plot_summary(self, single: dict, avg: dict, trace_count: int, renderer_state: str) -> None:
+        mode_text = "Model averaging" if (hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1) else "Single model"
+        if hasattr(self, "viz_single"):
+            self.viz_single.setHtml(f"<h3>{single.get('label','Single model')}</h3><p>Renderer: {renderer_state} | Mód: {mode_text} | Trace-ek: {trace_count}</p>")
+        if hasattr(self, "viz_averaging"):
+            self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
+
     def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
         points: list[tuple[float, float, str]] = []
         patient_id = str((self._last_pk_payload or {}).get("patient_id", "")).strip()
@@ -1629,21 +1636,37 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if view is None or not hasattr(view, "setHtml"):
                 return
             print("[DEBUG][PLOT] render target widget class:", type(view).__name__)
-            html = pio.to_html(fig, include_plotlyjs="inline", full_html=False, default_height="620px", default_width="100%", div_id="vanco_plot_chart")
+            plot_config = {"displayModeBar": True, "scrollZoom": True, "responsive": True, "displaylogo": False}
+            html = pio.to_html(
+                fig,
+                include_plotlyjs="inline",
+                full_html=False,
+                default_height="620px",
+                default_width="100%",
+                div_id="vanco_plot_chart",
+                config=plot_config,
+            )
             try:
                 view.setHtml(f"<html><body style='margin:0'>{html}</body></html>", QUrl.fromLocalFile(str(Path.cwd()) + "/"))
             except TypeError:
                 view.setHtml(f"<html><body style='margin:0'>{html}</body></html>")
-            self._plot_renderer_state = "Plotly" if self._is_plot_webengine() else "Non-Plotly HTML widget"
+            self._plot_renderer_state = "Plotly loading" if self._is_plot_webengine() else "Non-Plotly HTML widget"
             self._plot_retry_done = False
-            if hasattr(self, "viz_single"):
-                self.viz_single.setHtml(f"<h3>{single.get('label','Single model')}</h3><p>Renderer: {self._plot_renderer_state} | Trace-ek: {len(fig.data)}</p>")
-            if hasattr(self, "viz_averaging"):
-                self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
+            self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
             if self._is_plot_webengine() and hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
                 def _on_load_finished(ok: bool):
-                    if ok or not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK or not pred_x or not pred_y:
+                    print("[DEBUG][PLOT] loadFinished:", ok)
+                    if ok:
+                        self._plot_renderer_state = "Plotly"
+                        print("[DEBUG][PLOT] final renderer state:", self._plot_renderer_state)
+                        self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
                         return
+                    if not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK or not pred_x or not pred_y:
+                        print("[DEBUG][PLOT] fallback not triggered (hidden view or missing data).")
+                        self._plot_renderer_state = "Plotly load failed"
+                        self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
+                        return
+                    print("[DEBUG][PLOT] fallback triggered: matplotlib.")
                     mfig = plt.figure(figsize=(8, 4), dpi=120)
                     ax = mfig.add_subplot(111)
                     ax.plot(pred_x, pred_y, linewidth=2.0, color="#2563eb")
@@ -1656,6 +1679,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
                     view.setHtml(f"<img src='data:image/png;base64,{png_b64}'/>")
                     self._plot_renderer_state = "Matplotlib fallback"
+                    print("[DEBUG][PLOT] final renderer state:", self._plot_renderer_state)
+                    self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
                 view.loadFinished.connect(_on_load_finished)
                 self._plot_load_finished_hooked = True
         finally:

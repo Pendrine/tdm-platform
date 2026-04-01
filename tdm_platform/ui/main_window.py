@@ -5,12 +5,13 @@ import traceback
 import base64
 import tempfile
 import uuid
+import math
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, QDateTime, QTime, QTimer, QUrl
+from PySide6.QtCore import QDate, QDateTime, QTime, Qt, QTimer, QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -586,10 +587,31 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.toggle_regimen_conc = QCheckBox("Ajánlott sémák prediktált koncentrációi")
         self.toggle_regimen_auc = QCheckBox("Ajánlott sémák prediktált AUC overlay")
         self.toggle_dose_annotations = QCheckBox("Dózisesemény annotációk")
+        self.toggle_mic_line = QCheckBox("MIC célvonal")
+        self.toggle_mic_line.setChecked(True)
         self.plotly_rerender_btn = QPushButton("Plotly újrarender")
         self.matplotlib_fallback_btn = QPushButton("Matplotlib fallback")
+        top.addWidget(QLabel("Nézet:"))
         top.addWidget(self.view_combo)
-        for chk in [
+        top.addWidget(self.plotly_rerender_btn)
+        top.addWidget(self.matplotlib_fallback_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+        main_row = QSplitter(Qt.Horizontal, self.plot_tab)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        self.viz_mode_tabs = QTabWidget()
+        self.viz_single = QTextBrowser()
+        self.viz_averaging = QTextBrowser()
+        self.viz_mode_tabs.addTab(self.viz_single, "Single model")
+        self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
+        left_layout.addWidget(self.viz_mode_tabs)
+        main_row.addWidget(left_panel)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        flags_box = QGroupBox("Vizualizációs rétegek")
+        flags_grid = QGridLayout(flags_box)
+        flag_widgets = [
             self.toggle_obs,
             self.toggle_fit,
             self.toggle_projection,
@@ -600,17 +622,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.toggle_regimen_conc,
             self.toggle_regimen_auc,
             self.toggle_dose_annotations,
-        ]:
-            top.addWidget(chk)
-        top.addWidget(self.plotly_rerender_btn)
-        top.addWidget(self.matplotlib_fallback_btn)
-        top.addStretch(1)
-        layout.addLayout(top)
-        self.viz_mode_tabs = QTabWidget()
-        self.viz_single = QTextBrowser()
-        self.viz_averaging = QTextBrowser()
-        self.viz_mode_tabs.addTab(self.viz_single, "Single model")
-        self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
+            self.toggle_mic_line,
+        ]
+        for idx, chk in enumerate(flag_widgets):
+            flags_grid.addWidget(chk, idx // 2, idx % 2)
+        right_layout.addWidget(flags_box)
+        self.model_avg_table = QTableWidget(0, 6)
+        self.model_avg_table.setHorizontalHeaderLabels(["Modell", "Súly", "RMSE", "MAE", "AUC24", "AUC/MIC"])
+        right_layout.addWidget(self.model_avg_table, 1)
+        main_row.addWidget(right_panel)
+        main_row.setSizes([760, 420])
+        layout.addWidget(main_row)
         self.viz_mode_tabs.currentChanged.connect(lambda *_: self._schedule_render("tab_changed"))
         self.view_combo.currentIndexChanged.connect(lambda *_: self._schedule_render("view_combo"))
         for chk in [
@@ -624,11 +646,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.toggle_regimen_conc,
             self.toggle_regimen_auc,
             self.toggle_dose_annotations,
+            self.toggle_mic_line,
         ]:
             chk.stateChanged.connect(lambda *_args, name=chk.text(): self._schedule_render(f"toggle:{name}"))
         self.plotly_rerender_btn.clicked.connect(lambda *_: self._schedule_render("manual_plotly_rerender", force=True))
         self.matplotlib_fallback_btn.clicked.connect(self._render_manual_matplotlib_fallback)
-        layout.addWidget(self.viz_mode_tabs)
         if hasattr(self, "plot_view") and isinstance(self.plot_view, QWebEngineView):
             self.viz_plot_view = self.plot_view
             self.viz_plot_view.setVisible(True)
@@ -643,9 +665,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 self.tabs.currentChanged.connect(self._on_main_tabs_changed)
             except Exception:
                 pass
-        self.model_avg_table = QTableWidget(0, 6)
-        self.model_avg_table.setHorizontalHeaderLabels(["Modell", "Súly", "RMSE", "MAE", "AUC24", "AUC/MIC"])
-        layout.addWidget(self.model_avg_table)
+        self._plot_load_finished_handler = None
 
     def _run_model_selection_only(self) -> None:
         try:
@@ -786,6 +806,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if not hasattr(self, "episode_events_table"):
             return events
         print("[DEBUG][UI] event rows count before parse:", self.episode_events_table.rowCount())
+        reference_dt = None
+        if hasattr(self, "relative_reference_dt"):
+            try:
+                reference_dt = self.relative_reference_dt.dateTime().toPython()
+            except Exception:
+                reference_dt = None
         for row in range(self.episode_events_table.rowCount()):
             def txt(col: int) -> str:
                 if col == 1:
@@ -795,18 +821,24 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 item = self.episode_events_table.item(row, col)
                 return item.text().strip() if item else ""
 
-            events.append(
-                {
-                    "time_h": txt(0),
-                    "event_type": txt(1),
-                    "dose_mg": txt(2),
-                    "tinf_h": txt(3),
-                    "level_mg_l": txt(4),
-                    "mic": txt(5),
-                    "creatinine": txt(6),
-                    "note": txt(7),
-                }
-            )
+            event = {
+                "time_h": txt(0),
+                "event_type": txt(1),
+                "dose_mg": txt(2),
+                "tinf_h": txt(3),
+                "level_mg_l": txt(4),
+                "mic": txt(5),
+                "creatinine": txt(6),
+                "note": txt(7),
+            }
+            if reference_dt is not None:
+                t_h = self._safe_optional_float(event.get("time_h"))
+                if t_h is not None:
+                    try:
+                        event["event_datetime"] = (reference_dt + timedelta(hours=float(t_h))).isoformat(timespec="minutes")
+                    except Exception:
+                        pass
+            events.append(event)
         parsed_sample_rows = len([e for e in events if "sample" in str(e.get("event_type", "")).lower() and str(e.get("level_mg_l", "")).strip() != ""])
         parsed_dose_rows = len([e for e in events if "dose" in str(e.get("event_type", "")).lower() and str(e.get("dose_mg", "")).strip() != ""])
         parsed_creatinine_rows = len([e for e in events if "creatinine" in str(e.get("event_type", "")).lower() and str(e.get("creatinine", "")).strip() != ""])
@@ -1299,7 +1331,22 @@ class MainWindow(legacy_ui.TDMMainWindow):
         rows = self.history_table.property("history_rows") or []
         idx = self.history_table.currentRow()
         if 0 <= idx < len(rows):
-            self._history_tab.render_detail(self.history_detail, rows[idx], username_resolver=self._username_for_email)
+            row = rows[idx]
+            self._history_tab.render_detail(self.history_detail, row, username_resolver=self._username_for_email)
+            if hasattr(self, "history_detail") and self.history_detail is not None:
+                user_email = str(row.get("user", "")).strip()
+                user_name = self._username_for_email(user_email) if user_email else "-"
+                ts = str(row.get("timestamp", "")).strip() or "-"
+                method = str(row.get("method", "")).strip() or "-"
+                pid = str(row.get("patient_id", "")).strip() or "-"
+                audit_html = (
+                    "<hr/><h4>Audit</h4>"
+                    f"<p><b>Felhasználó:</b> {user_name} ({user_email or '-'})<br/>"
+                    f"<b>Timestamp:</b> {ts}<br/>"
+                    f"<b>Method:</b> {method}<br/>"
+                    f"<b>Patient ID:</b> {pid}</p>"
+                )
+                self.history_detail.append(audit_html)
 
     def update_user_status_ui(self):
         super().update_user_status_ui()
@@ -1525,15 +1572,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     "toggle_regimen_conc",
                     "toggle_regimen_auc",
                     "toggle_dose_annotations",
+                    "toggle_mic_line",
                 )
                 if hasattr(self, name)
             ),
         )
 
     def _schedule_render(self, trigger: str, force: bool = False) -> None:
+        seq = int(getattr(self, "_render_request_seq", 0)) + 1
+        self._render_request_seq = seq
+        self._scheduled_render_seq = seq
         self._last_render_trigger = trigger
         self._force_next_render = bool(force)
-        print(f"[DEBUG][PLOT] schedule render trigger={trigger} force={force}")
+        print(f"[DEBUG][PLOT] schedule render trigger={trigger} force={force} seq={seq}")
         timer = getattr(self, "_render_debounce_timer", None)
         if timer is None:
             self._render_debounce_timer = QTimer(self)
@@ -1543,6 +1594,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
         timer.start(120)
 
     def _perform_scheduled_render(self) -> None:
+        if getattr(self, "_scheduled_render_seq", -1) != getattr(self, "_render_request_seq", -1):
+            print("[DEBUG][PLOT] render skipped: stale scheduled request")
+            return
         sig = self._current_render_signature()
         force = bool(getattr(self, "_force_next_render", False))
         trigger = str(getattr(self, "_last_render_trigger", "unknown"))
@@ -1632,8 +1686,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             print(f"[DEBUG][PLOT] file-based render failed: {exc}")
             return False
 
-    def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
-        points: list[tuple[float, float, str]] = []
+    def _collect_history_sample_points(self) -> list[dict]:
+        points: list[dict] = []
         patient_id = str((self._last_pk_payload or {}).get("patient_id", "")).strip()
         if not patient_id:
             return points
@@ -1652,7 +1706,22 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 c = self._safe_optional_float(ev.get("level_mg_l"))
                 if t_h is None or c is None:
                     continue
-                points.append((t_h, c, f"{ts} | {method}"))
+                event_dt = str(
+                    ev.get("event_datetime")
+                    or ev.get("sample_datetime")
+                    or ev.get("timestamp")
+                    or ts
+                    or ""
+                ).strip()
+                points.append(
+                    {
+                        "time_h": t_h,
+                        "conc": c,
+                        "episode_ts": ts,
+                        "event_dt": event_dt,
+                        "method": method,
+                    }
+                )
         return points
 
     def _build_dose_event_traces(self, fig: go.Figure, dose_events: list[dict], y_anchor: float) -> None:
@@ -1757,11 +1826,62 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if observed_master and hasattr(self, "toggle_history_samples") and self.toggle_history_samples.isChecked():
                 hp = self._collect_history_sample_points()
                 if hp:
-                    fig.add_trace(go.Scatter(x=[p[0] for p in hp], y=[p[1] for p in hp], mode="markers", name="Korábbi beteg minták", marker=dict(size=8, color="#a855f7", symbol="diamond"), text=[p[2] for p in hp], hovertemplate="%{text}<br>t=%{x}h, C=%{y}<extra></extra>"))
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[p["time_h"] for p in hp],
+                            y=[p["conc"] for p in hp],
+                            mode="markers",
+                            name="Korábbi beteg minták",
+                            marker=dict(size=8, color="#a855f7", symbol="diamond"),
+                            text=[
+                                f"{p.get('episode_ts','-')} | {p.get('method','-')} | sample_dt={p.get('event_dt','-')}"
+                                for p in hp
+                            ],
+                            hovertemplate="%{text}<br>t=%{x}h, C=%{y}<extra></extra>",
+                        )
+                    )
+            if (not pred_x or len(pred_x) <= 2) and obs_x and obs_y and len(obs_x) >= 2:
+                try:
+                    c0 = max(float(obs_y[0]), 1e-6)
+                    c1 = max(float(obs_y[-1]), 1e-6)
+                    t0 = float(obs_x[0])
+                    t1 = float(obs_x[-1])
+                    if t1 > t0 and c1 > 0:
+                        k = max((math.log(c0) - math.log(c1)) / (t1 - t0), 1e-6)
+                        fit_x = [t0 + ((t1 - t0) * i / 48.0) for i in range(49)]
+                        fit_y = [c0 * math.exp(-k * (x - t0)) for x in fit_x]
+                        pred_x, pred_y = fit_x, fit_y
+                        if not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked():
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=pred_x,
+                                    y=pred_y,
+                                    mode="lines",
+                                    name="Klasszikus fitted curve",
+                                    line=dict(width=2.0, dash="dot", color="#0f766e"),
+                                )
+                            )
+                except Exception as exc:
+                    print(f"[DEBUG][PLOT] classical fitted curve build failed: {exc}")
             if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
                 self._build_dose_event_traces(fig, dose_events, max(pred_y + obs_y + [1.0]) * 1.05)
             if view_mode == "auc" and pred_x and pred_y:
                 fig.add_trace(go.Scatter(x=pred_x, y=pred_y, fill="tozeroy", mode="lines", opacity=0.25, name="AUC area"))
+            mic_value_for_plot = self._safe_optional_float((self._last_pk_payload or {}).get("mic"))
+            if (
+                view_mode == "concentration"
+                and mic_value_for_plot is not None
+                and mic_value_for_plot > 0
+                and hasattr(self, "toggle_mic_line")
+                and self.toggle_mic_line.isChecked()
+            ):
+                fig.add_hline(
+                    y=mic_value_for_plot,
+                    line_dash="dot",
+                    line_color="#b91c1c",
+                    annotation_text=f"MIC {mic_value_for_plot:g}",
+                    annotation_position="top left",
+                )
             self._build_regimen_overlay_traces(fig, view_mode)
             mic_value = (self.results or {}).get("pk", {}).get("auc_mic")
             subtitle = f"AUC/MIC: {self._fmt_float(mic_value, 1, na='n.a.')}" if mic_value is not None else "MIC nincs megadva"
@@ -1832,6 +1952,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                                 state["pending"] = False
                                 self._plot_renderer_state = "Plotly"
                                 self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+                                print(f"[DEBUG][PLOT] request state after success: id={active_id} state={state}")
                                 print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
 
                         if state.get("fallback_executed"):
@@ -1851,15 +1972,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         state["pending"] = False
                         self._plot_renderer_state = "Plotly"
                         self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+                        print(f"[DEBUG][PLOT] request state after success: id={active_id} state={state}")
                         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
                         return
                     self._schedule_plot_fallback(active_id)
-                try:
-                    view.loadFinished.disconnect()
-                except Exception:
-                    pass
+                previous_handler = getattr(self, "_plot_load_finished_handler", None)
+                if previous_handler is not None:
+                    try:
+                        view.loadFinished.disconnect(previous_handler)
+                    except Exception:
+                        pass
                 view.loadFinished.connect(_on_load_finished)
-                self._plot_load_finished_hooked = True
+                self._plot_load_finished_handler = _on_load_finished
         finally:
             self._plot_render_in_progress = False
 

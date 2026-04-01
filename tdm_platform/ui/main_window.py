@@ -1502,6 +1502,50 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if hasattr(self, "viz_averaging"):
             self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
 
+    def _schedule_plot_fallback(self, request_id: int) -> None:
+        print(f"[DEBUG][PLOT] delayed fallback scheduled: id={request_id}")
+        timer = getattr(self, "_plot_fallback_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._plot_fallback_request_id = request_id
+        self._plot_fallback_timer = QTimer(self)
+        self._plot_fallback_timer.setSingleShot(True)
+        self._plot_fallback_timer.timeout.connect(lambda rid=request_id: self._execute_plot_fallback(rid))
+        self._plot_fallback_timer.start(300)
+
+    def _execute_plot_fallback(self, request_id: int) -> None:
+        if request_id != getattr(self, "_active_plot_request_id", -1):
+            print(f"[DEBUG][PLOT] delayed fallback canceled: id={request_id} (stale request)")
+            return
+        state = (getattr(self, "_plot_request_states", {}) or {}).get(request_id, {})
+        if state.get("completed_ok"):
+            print(f"[DEBUG][PLOT] delayed fallback canceled: id={request_id} (already successful)")
+            return
+        if not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK:
+            return
+        pred_x = state.get("pred_x", [])
+        pred_y = state.get("pred_y", [])
+        obs_x = state.get("obs_x", [])
+        obs_y = state.get("obs_y", [])
+        view = getattr(self, "viz_plot_view", None)
+        if not pred_x or not pred_y or view is None:
+            return
+        print(f"[DEBUG][PLOT] fallback executed: id={request_id}")
+        mfig = plt.figure(figsize=(8, 4), dpi=120)
+        ax = mfig.add_subplot(111)
+        ax.plot(pred_x, pred_y, linewidth=2.0, color="#2563eb")
+        if obs_x and obs_y:
+            ax.scatter(obs_x, obs_y, color="#16a34a")
+        buffer = BytesIO()
+        mfig.tight_layout()
+        mfig.savefig(buffer, format="png")
+        plt.close(mfig)
+        png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+        view.setHtml(f"<img src='data:image/png;base64,{png_b64}'/>")
+        self._plot_renderer_state = "Matplotlib fallback"
+        self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+        print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
+
     def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
         points: list[tuple[float, float, str]] = []
         patient_id = str((self._last_pk_payload or {}).get("patient_id", "")).strip()
@@ -1636,6 +1680,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if view is None or not hasattr(view, "setHtml"):
                 return
             print("[DEBUG][PLOT] render target widget class:", type(view).__name__)
+            request_id = int(getattr(self, "_plot_request_counter", 0)) + 1
+            self._plot_request_counter = request_id
+            self._active_plot_request_id = request_id
+            print(f"[DEBUG][PLOT] render request started: id={request_id}")
             plot_config = {"displayModeBar": True, "scrollZoom": True, "responsive": True, "displaylogo": False}
             html = pio.to_html(
                 fig,
@@ -1654,35 +1702,36 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 view.setHtml(html)
             self._plot_renderer_state = "Plotly loading" if self._is_plot_webengine() else "Non-Plotly HTML widget"
             self._plot_retry_done = False
+            self._plot_request_states = getattr(self, "_plot_request_states", {})
+            self._plot_request_states[request_id] = {
+                "single": single,
+                "avg": avg,
+                "trace_count": len(fig.data),
+                "pred_x": pred_x,
+                "pred_y": pred_y,
+                "obs_x": obs_x,
+                "obs_y": obs_y,
+                "completed_ok": False,
+            }
             self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
             if self._is_plot_webengine() and hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
                 def _on_load_finished(ok: bool):
-                    print("[DEBUG][PLOT] loadFinished:", ok)
+                    active_id = int(getattr(self, "_active_plot_request_id", -1))
+                    print(f"[DEBUG][PLOT] loadFinished({ok}): id={active_id}")
+                    state = (getattr(self, "_plot_request_states", {}) or {}).get(active_id, {})
+                    if not state:
+                        return
                     if ok:
+                        timer = getattr(self, "_plot_fallback_timer", None)
+                        if timer is not None and timer.isActive() and getattr(self, "_plot_fallback_request_id", -1) == active_id:
+                            timer.stop()
+                            print(f"[DEBUG][PLOT] delayed fallback canceled: id={active_id}")
+                        state["completed_ok"] = True
                         self._plot_renderer_state = "Plotly"
-                        print("[DEBUG][PLOT] final renderer state:", self._plot_renderer_state)
-                        self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
+                        self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+                        print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
                         return
-                    if not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK or not pred_x or not pred_y:
-                        print("[DEBUG][PLOT] fallback not triggered (hidden view or missing data).")
-                        self._plot_renderer_state = "Plotly load failed"
-                        self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
-                        return
-                    print("[DEBUG][PLOT] fallback triggered: matplotlib.")
-                    mfig = plt.figure(figsize=(8, 4), dpi=120)
-                    ax = mfig.add_subplot(111)
-                    ax.plot(pred_x, pred_y, linewidth=2.0, color="#2563eb")
-                    if obs_x and obs_y:
-                        ax.scatter(obs_x, obs_y, color="#16a34a")
-                    buffer = BytesIO()
-                    mfig.tight_layout()
-                    mfig.savefig(buffer, format="png")
-                    plt.close(mfig)
-                    png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-                    view.setHtml(f"<img src='data:image/png;base64,{png_b64}'/>")
-                    self._plot_renderer_state = "Matplotlib fallback"
-                    print("[DEBUG][PLOT] final renderer state:", self._plot_renderer_state)
-                    self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
+                    self._schedule_plot_fallback(active_id)
                 view.loadFinished.connect(_on_load_finished)
                 self._plot_load_finished_hooked = True
         finally:

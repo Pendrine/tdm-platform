@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtWebEngineWidgets import QWebEngineView
 from shiboken6 import isValid
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -620,11 +621,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         ]:
             chk.stateChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
         layout.addWidget(self.viz_mode_tabs)
-        if hasattr(self, "plot_view") and self.plot_view is not None:
+        if hasattr(self, "plot_view") and isinstance(self.plot_view, QWebEngineView):
             self.viz_plot_view = self.plot_view
             self.viz_plot_view.setVisible(True)
         else:
-            self.viz_plot_view = QTextBrowser()
+            self.viz_plot_view = QWebEngineView(self.plot_tab)
+        print("[DEBUG][PLOT] viz_plot_view widget class:", type(self.viz_plot_view).__name__)
         self.viz_plot_view.setMinimumHeight(460)
         self.viz_plot_view.setHtml("<p>Még nincs számítási eredmény.</p>")
         layout.addWidget(self.viz_plot_view, 1)
@@ -1485,6 +1487,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return False
         return bool(getattr(view, "isVisible", lambda: True)())
 
+    def _is_plot_webengine(self) -> bool:
+        return isinstance(getattr(self, "viz_plot_view", None), QWebEngineView)
+
     def _is_visualization_tab_active(self) -> bool:
         if not hasattr(self, "tabs") or not hasattr(self, "plot_tab"):
             return True
@@ -1623,18 +1628,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
             view = getattr(self, "viz_plot_view", None)
             if view is None or not hasattr(view, "setHtml"):
                 return
+            print("[DEBUG][PLOT] render target widget class:", type(view).__name__)
             html = pio.to_html(fig, include_plotlyjs="inline", full_html=False, default_height="620px", default_width="100%", div_id="vanco_plot_chart")
             try:
                 view.setHtml(f"<html><body style='margin:0'>{html}</body></html>", QUrl.fromLocalFile(str(Path.cwd()) + "/"))
             except TypeError:
                 view.setHtml(f"<html><body style='margin:0'>{html}</body></html>")
-            self._plot_renderer_state = "Plotly"
+            self._plot_renderer_state = "Plotly" if self._is_plot_webengine() else "Non-Plotly HTML widget"
             self._plot_retry_done = False
             if hasattr(self, "viz_single"):
                 self.viz_single.setHtml(f"<h3>{single.get('label','Single model')}</h3><p>Renderer: {self._plot_renderer_state} | Trace-ek: {len(fig.data)}</p>")
             if hasattr(self, "viz_averaging"):
                 self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
-            if hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
+            if self._is_plot_webengine() and hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
                 def _on_load_finished(ok: bool):
                     if ok or not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK or not pred_x or not pred_y:
                         return

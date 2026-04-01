@@ -1640,16 +1640,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
             html = pio.to_html(
                 fig,
                 include_plotlyjs="inline",
-                full_html=False,
+                full_html=True,
                 default_height="620px",
                 default_width="100%",
                 div_id="vanco_plot_chart",
                 config=plot_config,
             )
+            print("[DEBUG][PLOT] html length:", len(html))
+            print("[DEBUG][PLOT] contains 'plotly':", "plotly" in html.lower())
             try:
-                view.setHtml(f"<html><body style='margin:0'>{html}</body></html>", QUrl.fromLocalFile(str(Path.cwd()) + "/"))
+                view.setHtml(html, QUrl.fromLocalFile(str(Path.cwd()) + "/"))
             except TypeError:
-                view.setHtml(f"<html><body style='margin:0'>{html}</body></html>")
+                view.setHtml(html)
             self._plot_renderer_state = "Plotly loading" if self._is_plot_webengine() else "Non-Plotly HTML widget"
             self._plot_retry_done = False
             self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)

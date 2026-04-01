@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import traceback
 import base64
+import tempfile
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -1617,6 +1618,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
         state["fallback_executed"] = False
         self._execute_plot_fallback(rid)
 
+    def _render_plotly_html_via_file(self, html: str) -> bool:
+        try:
+            plot_dir = Path(tempfile.gettempdir()) / "tdm_platform_plots"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            html_path = plot_dir / "latest_plot.html"
+            html_path.write_text(html, encoding="utf-8")
+            print(f"[DEBUG][PLOT] loading plot from file: {html_path}")
+            self.viz_plot_view.load(QUrl.fromLocalFile(str(html_path)))
+            return True
+        except Exception as exc:
+            print(f"[DEBUG][PLOT] file-based render failed: {exc}")
+            return False
+
     def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
         points: list[tuple[float, float, str]] = []
         patient_id = str((self._last_pk_payload or {}).get("patient_id", "")).strip()
@@ -1755,22 +1769,20 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self._plot_request_counter = request_id
             self._active_plot_request_id = request_id
             print(f"[DEBUG][PLOT] render request started: id={request_id}")
-            plot_config = {"displayModeBar": True, "scrollZoom": True, "responsive": True, "displaylogo": False}
             html = pio.to_html(
                 fig,
-                include_plotlyjs="inline",
+                include_plotlyjs="cdn",
                 full_html=True,
                 default_height="620px",
                 default_width="100%",
                 div_id="vanco_plot_chart",
-                config=plot_config,
+                config={"responsive": True},
             )
             print("[DEBUG][PLOT] html length:", len(html))
             print("[DEBUG][PLOT] contains 'plotly':", "plotly" in html.lower())
-            try:
-                view.setHtml(html, QUrl.fromLocalFile(str(Path.cwd()) + "/"))
-            except TypeError:
-                view.setHtml(html)
+            ok_file_render = self._render_plotly_html_via_file(html)
+            if not ok_file_render:
+                print("[DEBUG][PLOT] Plotly file render failed -> fallback needed")
             self._plot_renderer_state = "Plotly loading" if self._is_plot_webengine() else "Non-Plotly HTML widget"
             self._plot_retry_done = False
             self._plot_request_states = getattr(self, "_plot_request_states", {})
@@ -1787,6 +1799,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "fallback_executed": False,
             }
             self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
+            if not ok_file_render:
+                self._execute_plot_fallback(request_id)
+                return
             if self._is_plot_webengine() and hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
                 def _on_load_finished(ok: bool):
                     active_id = int(getattr(self, "_active_plot_request_id", -1))
@@ -1809,10 +1824,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
                         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
                         return
-                    state["pending"] = False
-                    self._plot_renderer_state = "Plotly load failed"
-                    self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
-                    print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
+                    self._schedule_plot_fallback(active_id)
                 view.loadFinished.connect(_on_load_finished)
                 self._plot_load_finished_hooked = True
         finally:

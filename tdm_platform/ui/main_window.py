@@ -1736,9 +1736,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
         color_map = {"loading_dose": "#f59e0b", "maintenance_dose": "#2563eb", "extra_dose": "#ef4444"}
         grouped: dict[str, list[tuple[float, str]]] = {"loading_dose": [], "maintenance_dose": [], "extra_dose": []}
         for ev in dose_events:
-            t = float(ev.get("time", 0.0))
+            t = float(ev.get("time", ev.get("time_h", 0.0)) or 0.0)
             et = str(ev.get("event_type", "maintenance_dose")).lower()
-            grouped.setdefault(et, []).append((t, f"{et} | dose={ev.get('dose','-')} mg | tinf={ev.get('tinf','-')}h | tau={ev.get('tau','-')}"))
+            event_dt = str(ev.get("event_datetime") or ev.get("timestamp") or "-")
+            grouped.setdefault(et, []).append((t, f"{et} | dose={ev.get('dose','-')} mg | tinf={ev.get('tinf','-')}h | tau={ev.get('tau','-')} | dt={event_dt}"))
             color = color_map.get(et, "#64748b")
             fig.add_vline(x=t, line_dash="dash", line_color=color, opacity=0.7)
             if hasattr(self, "toggle_dose_annotations") and self.toggle_dose_annotations.isChecked():
@@ -1765,6 +1766,75 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     hovertemplate="%{text}<br>t=%{x}h<extra></extra>",
                 )
             )
+
+    def _expand_dose_events_for_plot(self, dose_events: list[dict], obs_x: list[float]) -> list[dict]:
+        payload = self._last_pk_payload or {}
+        expanded: list[dict] = []
+        seen: set[tuple[float, str]] = set()
+
+        def _append_event(raw: dict, source: str) -> None:
+            t_val = self._safe_optional_float(raw.get("time"))
+            if t_val is None:
+                t_val = self._safe_optional_float(raw.get("time_h"))
+            if t_val is None:
+                return
+            et = str(raw.get("event_type", "maintenance_dose")).lower() or "maintenance_dose"
+            key = (round(float(t_val), 4), et)
+            if key in seen:
+                return
+            seen.add(key)
+            expanded.append(
+                {
+                    "time": float(t_val),
+                    "event_type": et,
+                    "dose": raw.get("dose") or raw.get("dose_mg") or payload.get("dose"),
+                    "tinf": raw.get("tinf") or raw.get("tinf_h") or payload.get("tinf"),
+                    "tau": raw.get("tau") or raw.get("tau_h") or payload.get("tau"),
+                    "event_datetime": raw.get("event_datetime") or raw.get("timestamp"),
+                    "source": source,
+                }
+            )
+
+        for ev in dose_events or []:
+            _append_event(ev or {}, "plot_payload")
+        for ev in (payload.get("episode_events") or []):
+            if "dose" in str((ev or {}).get("event_type", "")).lower():
+                _append_event(ev or {}, "episode_events")
+
+        sample_times = [float(x) for x in obs_x if isinstance(x, (int, float))]
+        if sample_times and payload.get("tau") is not None:
+            tau_h = self._safe_optional_float(payload.get("tau"))
+            dose_val = self._safe_optional_float(payload.get("dose"))
+            tinf_val = self._safe_optional_float(payload.get("tinf"))
+            if tau_h is not None and tau_h > 0 and dose_val is not None:
+                max_sample_t = max(sample_times)
+                first_sample_t = min(sample_times)
+                base_candidates = [e["time"] for e in expanded if e.get("event_type") == "maintenance_dose" and e.get("time") is not None]
+                base_t = max(base_candidates) if base_candidates else 0.0
+                if base_t > first_sample_t:
+                    base_t = 0.0
+                cur_t = base_t
+                idx = 0
+                while cur_t <= max_sample_t + 1e-6 and idx < 200:
+                    _append_event(
+                        {
+                            "time": cur_t,
+                            "event_type": "maintenance_dose",
+                            "dose": dose_val,
+                            "tinf": tinf_val,
+                            "tau": tau_h,
+                        },
+                        "generated_schedule",
+                    )
+                    cur_t += tau_h
+                    idx += 1
+
+        expanded.sort(key=lambda item: float(item.get("time", 0.0)))
+        print(
+            "[DEBUG][PLOT] expanded dose events:",
+            [{"time": e.get("time"), "type": e.get("event_type"), "source": e.get("source")} for e in expanded],
+        )
+        return expanded
 
     def _build_regimen_overlay_traces(self, fig: go.Figure, view_mode: str) -> None:
         if not self.results or not self.results.get("pk"):
@@ -1819,7 +1889,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
             obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
             obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
-            dose_events = list(single.get("dose_events") or spec.get("dose_events", []) or [])
+            obs_time_points = [self._safe_optional_float(x) for x in obs_x]
+            dose_events = self._expand_dose_events_for_plot(
+                list(single.get("dose_events") or spec.get("dose_events", []) or []),
+                [float(x) for x in obs_time_points if x is not None],
+            )
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
             view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"
             fig = go.Figure()

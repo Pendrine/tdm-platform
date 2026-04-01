@@ -1503,7 +1503,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
 
     def _schedule_plot_fallback(self, request_id: int) -> None:
-        print(f"[DEBUG][PLOT] delayed fallback scheduled: id={request_id}")
+        state = (getattr(self, "_plot_request_states", {}) or {}).get(request_id, {})
+        print(f"[DEBUG][PLOT] delayed fallback scheduled: id={request_id} state={state}")
         timer = getattr(self, "_plot_fallback_timer", None)
         if timer is not None:
             timer.stop()
@@ -1511,15 +1512,16 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._plot_fallback_timer = QTimer(self)
         self._plot_fallback_timer.setSingleShot(True)
         self._plot_fallback_timer.timeout.connect(lambda rid=request_id: self._execute_plot_fallback(rid))
-        self._plot_fallback_timer.start(300)
+        self._plot_fallback_timer.start(600)
 
     def _execute_plot_fallback(self, request_id: int) -> None:
+        states = getattr(self, "_plot_request_states", {}) or {}
+        state = states.get(request_id, {})
         if request_id != getattr(self, "_active_plot_request_id", -1):
-            print(f"[DEBUG][PLOT] delayed fallback canceled: id={request_id} (stale request)")
+            print(f"[DEBUG][PLOT] delayed fallback skipped: id={request_id} reason=stale_request state={state}")
             return
-        state = (getattr(self, "_plot_request_states", {}) or {}).get(request_id, {})
-        if state.get("completed_ok"):
-            print(f"[DEBUG][PLOT] delayed fallback canceled: id={request_id} (already successful)")
+        if state.get("succeeded") or state.get("fallback_executed") or not state.get("pending", False):
+            print(f"[DEBUG][PLOT] delayed fallback skipped: id={request_id} reason=resolved state={state}")
             return
         if not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK:
             return
@@ -1542,6 +1544,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         plt.close(mfig)
         png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
         view.setHtml(f"<img src='data:image/png;base64,{png_b64}'/>")
+        state["pending"] = False
+        state["fallback_executed"] = True
         self._plot_renderer_state = "Matplotlib fallback"
         self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
@@ -1711,7 +1715,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "pred_y": pred_y,
                 "obs_x": obs_x,
                 "obs_y": obs_y,
-                "completed_ok": False,
+                "pending": True,
+                "succeeded": False,
+                "fallback_executed": False,
             }
             self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
             if self._is_plot_webengine() and hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
@@ -1721,12 +1727,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     state = (getattr(self, "_plot_request_states", {}) or {}).get(active_id, {})
                     if not state:
                         return
+                    print(f"[DEBUG][PLOT] request state before handling: id={active_id} state={state}")
                     if ok:
+                        if state.get("fallback_executed"):
+                            print(f"[DEBUG][PLOT] late success ignored after fallback: id={active_id}")
+                            return
                         timer = getattr(self, "_plot_fallback_timer", None)
                         if timer is not None and timer.isActive() and getattr(self, "_plot_fallback_request_id", -1) == active_id:
                             timer.stop()
                             print(f"[DEBUG][PLOT] delayed fallback canceled: id={active_id}")
-                        state["completed_ok"] = True
+                        state["succeeded"] = True
+                        state["pending"] = False
                         self._plot_renderer_state = "Plotly"
                         self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
                         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")

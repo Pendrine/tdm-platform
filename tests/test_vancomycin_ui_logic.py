@@ -171,3 +171,17 @@ def test_get_active_sample_times_and_levels_falls_back_to_relative_fields():
     t1, c1, t2, c2, source = MainWindow._get_active_sample_times_and_levels(dummy)
     assert source == "relative"
     assert (t1, c1, t2, c2) == ("2.0", "23.5", "11.0", "8.0")
+
+
+def test_get_active_sample_times_and_levels_ignores_hidden_clinical_values():
+    dummy = SimpleNamespace(
+        t1_edit=_DummyLineEdit("2.0"),
+        t2_edit=_DummyLineEdit("11.0"),
+        level1_rel_edit=_DummyLineEdit("23.5"),
+        level2_rel_edit=_DummyLineEdit("8.0"),
+        level1_clin_edit=_DummyLineEdit("30.0", visible=False),
+        level2_clin_edit=_DummyLineEdit("10.0", visible=False),
+    )
+    t1, c1, t2, c2, source = MainWindow._get_active_sample_times_and_levels(dummy)
+    assert source == "relative"
+    assert (t1, c1, t2, c2) == ("2.0", "23.5", "11.0", "8.0")

@@ -253,7 +253,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if hasattr(c1_widget, "isVisible") and hasattr(c2_widget, "isVisible"):
                 if c1_widget.isVisible() and c2_widget.isVisible() and (c1 or c2):
                     return t1, c1, t2, c2, "clinical"
-            if c1 or c2:
+            else:
+                if c1 or c2:
+                    return t1, c1, t2, c2, "clinical"
+            if not hasattr(c1_widget, "isVisible") and (c1 or c2):
                 return t1, c1, t2, c2, "clinical"
         c1_rel = self.level1_rel_edit.text().strip() if hasattr(self, "level1_rel_edit") else ""
         c2_rel = self.level2_rel_edit.text().strip() if hasattr(self, "level2_rel_edit") else ""
@@ -1940,7 +1943,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "drug": "Vancomycin",
             "method": method,
             "status": result["status"],
-            "primary": f"AUC24 {self._fmt_float(result.get('auc24'), 1)}",
+            "primary": (
+                f"AUC/MIC {self._fmt_float(result.get('auc_mic'), 1, na='n.a.')}"
+                if target_assessment.get("target_basis") == "auc_mic_primary"
+                else f"AUC24 {self._fmt_float(result.get('auc24'), 1)}"
+            ),
             "secondary": f"CL {self._fmt_float(result.get('cl_l_h'), 2)} L/h",
             "regimen": f"{result['suggestion']['best']['dose']:.0f} mg q{result['suggestion']['best']['tau']:.0f}h",
             "status_sub": auto.get("rationale", result["status"]),

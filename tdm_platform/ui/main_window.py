@@ -4,6 +4,7 @@ import sys
 import traceback
 import base64
 import tempfile
+import uuid
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -1577,7 +1578,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if request_id != getattr(self, "_active_plot_request_id", -1):
             print(f"[DEBUG][PLOT] delayed fallback skipped: id={request_id} reason=stale_request state={state}")
             return
-        if state.get("succeeded") or state.get("fallback_executed") or not state.get("pending", False):
+        if state.get("succeeded") or state.get("fallback_executed"):
             print(f"[DEBUG][PLOT] delayed fallback skipped: id={request_id} reason=resolved state={state}")
             return
         if not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK:
@@ -1622,7 +1623,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         try:
             plot_dir = Path(tempfile.gettempdir()) / "tdm_platform_plots"
             plot_dir.mkdir(parents=True, exist_ok=True)
-            html_path = plot_dir / "latest_plot.html"
+            html_path = plot_dir / f"plot_{uuid.uuid4().hex}.html"
             html_path.write_text(html, encoding="utf-8")
             print(f"[DEBUG][PLOT] loading plot from file: {html_path}")
             self.viz_plot_view.load(QUrl.fromLocalFile(str(html_path)))
@@ -1716,6 +1717,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             return
         self._plot_render_in_progress = True
         try:
+            timer = getattr(self, "_plot_fallback_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+                print("[DEBUG][PLOT] previous fallback timer cancelled")
             self._last_plot_spec = spec or {}
             render_signature = (
                 str(spec.get("title", "")),
@@ -1785,7 +1790,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 print("[DEBUG][PLOT] Plotly file render failed -> fallback needed")
             self._plot_renderer_state = "Plotly loading" if self._is_plot_webengine() else "Non-Plotly HTML widget"
             self._plot_retry_done = False
-            self._plot_request_states = getattr(self, "_plot_request_states", {})
+            self._plot_request_states = {}
             self._plot_request_states[request_id] = {
                 "single": single,
                 "avg": avg,
@@ -1802,7 +1807,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if not ok_file_render:
                 self._execute_plot_fallback(request_id)
                 return
-            if self._is_plot_webengine() and hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
+            if self._is_plot_webengine() and hasattr(view, "loadFinished"):
                 def _on_load_finished(ok: bool):
                     active_id = int(getattr(self, "_active_plot_request_id", -1))
                     print(f"[DEBUG][PLOT] loadFinished({ok}): id={active_id}")
@@ -1849,6 +1854,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
                         return
                     self._schedule_plot_fallback(active_id)
+                try:
+                    view.loadFinished.disconnect()
+                except Exception:
+                    pass
                 view.loadFinished.connect(_on_load_finished)
                 self._plot_load_finished_hooked = True
         finally:

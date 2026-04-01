@@ -870,6 +870,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
         except ValueError:
             return None
 
+    @staticmethod
+    def _parse_event_datetime(raw: object) -> datetime | None:
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        normalized = txt.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized)
+        except Exception:
+            return None
+
     def _safe_required_float(self, raw: object, field: str) -> float:
         value = self._safe_optional_float(raw)
         if value is None:
@@ -1699,6 +1710,20 @@ class MainWindow(legacy_ui.TDMMainWindow):
         patient_id = str((self._last_pk_payload or {}).get("patient_id", "")).strip()
         if not patient_id:
             return points
+        ref_dt = None
+        if hasattr(self, "relative_reference_dt"):
+            try:
+                ref_dt = self.relative_reference_dt.dateTime().toPython()
+            except Exception:
+                ref_dt = None
+        current_event_dts = [
+            self._parse_event_datetime(ev.get("event_datetime"))
+            for ev in ((self._last_pk_payload or {}).get("episode_events") or [])
+            if isinstance(ev, dict)
+        ]
+        current_event_dts = [dt for dt in current_event_dts if dt is not None]
+        window_start = min(current_event_dts) if current_event_dts else None
+        window_end = max(current_event_dts) if current_event_dts else None
         for row in self.history_data or []:
             if str(row.get("drug", "")).lower() != "vancomycin":
                 continue
@@ -1713,7 +1738,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 t_h = self._safe_optional_float(ev.get("time_h"))
                 c = self._safe_optional_float(ev.get("level_mg_l"))
                 if t_h is None or c is None:
-                    continue
+                    if c is None:
+                        continue
                 event_dt = str(
                     ev.get("event_datetime")
                     or ev.get("sample_datetime")
@@ -1721,6 +1747,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     or ts
                     or ""
                 ).strip()
+                event_dt_obj = self._parse_event_datetime(event_dt)
+                if window_start is not None and window_end is not None and event_dt_obj is not None:
+                    if event_dt_obj < (window_start - timedelta(hours=12)) or event_dt_obj > (window_end + timedelta(hours=12)):
+                        continue
+                if ref_dt is not None and event_dt_obj is not None:
+                    t_h = (event_dt_obj - ref_dt).total_seconds() / 3600.0
+                if t_h is None:
+                    continue
                 points.append(
                     {
                         "time_h": t_h,
@@ -1767,13 +1801,24 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 )
             )
 
-    def _expand_dose_events_for_plot(self, dose_events: list[dict], obs_x: list[float]) -> list[dict]:
+    def _expand_dose_events_for_plot(self, dose_events: list[dict], obs_x: list[float], pred_x: list[float]) -> list[dict]:
         payload = self._last_pk_payload or {}
         expanded: list[dict] = []
         seen: set[tuple[float, str]] = set()
+        ref_dt = None
+        if hasattr(self, "relative_reference_dt"):
+            try:
+                ref_dt = self.relative_reference_dt.dateTime().toPython()
+            except Exception:
+                ref_dt = None
 
         def _append_event(raw: dict, source: str) -> None:
-            t_val = self._safe_optional_float(raw.get("time"))
+            t_val = None
+            raw_dt = self._parse_event_datetime(raw.get("event_datetime") or raw.get("timestamp"))
+            if ref_dt is not None and raw_dt is not None:
+                t_val = (raw_dt - ref_dt).total_seconds() / 3600.0
+            if t_val is None:
+                t_val = self._safe_optional_float(raw.get("time"))
             if t_val is None:
                 t_val = self._safe_optional_float(raw.get("time_h"))
             if t_val is None:
@@ -1802,12 +1847,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 _append_event(ev or {}, "episode_events")
 
         sample_times = [float(x) for x in obs_x if isinstance(x, (int, float))]
+        curve_times = [float(x) for x in pred_x if isinstance(x, (int, float))]
         if sample_times and payload.get("tau") is not None:
             tau_h = self._safe_optional_float(payload.get("tau"))
             dose_val = self._safe_optional_float(payload.get("dose"))
             tinf_val = self._safe_optional_float(payload.get("tinf"))
             if tau_h is not None and tau_h > 0 and dose_val is not None:
+                explicit_times = [e["time"] for e in expanded if e.get("time") is not None]
                 max_sample_t = max(sample_times)
+                max_curve_t = max(curve_times) if curve_times else max_sample_t
+                max_explicit_t = max(explicit_times) if explicit_times else max_sample_t
+                max_target_t = max(max_sample_t, max_curve_t, max_explicit_t) + tau_h
                 first_sample_t = min(sample_times)
                 base_candidates = [e["time"] for e in expanded if e.get("event_type") == "maintenance_dose" and e.get("time") is not None]
                 base_t = max(base_candidates) if base_candidates else 0.0
@@ -1815,7 +1865,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     base_t = 0.0
                 cur_t = base_t
                 idx = 0
-                while cur_t <= max_sample_t + 1e-6 and idx < 200:
+                while cur_t <= max_target_t + 1e-6 and idx < 400:
                     _append_event(
                         {
                             "time": cur_t,
@@ -1890,9 +1940,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
             obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
             obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
             obs_time_points = [self._safe_optional_float(x) for x in obs_x]
+            pred_time_points = [self._safe_optional_float(x) for x in pred_x]
             dose_events = self._expand_dose_events_for_plot(
                 list(single.get("dose_events") or spec.get("dose_events", []) or []),
                 [float(x) for x in obs_time_points if x is not None],
+                [float(x) for x in pred_time_points if x is not None],
             )
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
             view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"

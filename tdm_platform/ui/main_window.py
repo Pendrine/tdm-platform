@@ -584,6 +584,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.toggle_regimen_conc = QCheckBox("Ajánlott sémák prediktált koncentrációi")
         self.toggle_regimen_auc = QCheckBox("Ajánlott sémák prediktált AUC overlay")
         self.toggle_dose_annotations = QCheckBox("Dózisesemény annotációk")
+        self.plotly_rerender_btn = QPushButton("Plotly újrarender")
+        self.matplotlib_fallback_btn = QPushButton("Matplotlib fallback")
         top.addWidget(self.view_combo)
         for chk in [
             self.toggle_obs,
@@ -598,6 +600,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.toggle_dose_annotations,
         ]:
             top.addWidget(chk)
+        top.addWidget(self.plotly_rerender_btn)
+        top.addWidget(self.matplotlib_fallback_btn)
         top.addStretch(1)
         layout.addLayout(top)
         self.viz_mode_tabs = QTabWidget()
@@ -605,8 +609,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self.viz_averaging = QTextBrowser()
         self.viz_mode_tabs.addTab(self.viz_single, "Single model")
         self.viz_mode_tabs.addTab(self.viz_averaging, "Model averaging")
-        self.viz_mode_tabs.currentChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
-        self.view_combo.currentIndexChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
+        self.viz_mode_tabs.currentChanged.connect(lambda *_: self._schedule_render("tab_changed"))
+        self.view_combo.currentIndexChanged.connect(lambda *_: self._schedule_render("view_combo"))
         for chk in [
             self.toggle_obs,
             self.toggle_fit,
@@ -619,7 +623,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.toggle_regimen_auc,
             self.toggle_dose_annotations,
         ]:
-            chk.stateChanged.connect(lambda *_: self.render_plot(self._last_plot_spec or {}))
+            chk.stateChanged.connect(lambda *_args, name=chk.text(): self._schedule_render(f"toggle:{name}"))
+        self.plotly_rerender_btn.clicked.connect(lambda *_: self._schedule_render("manual_plotly_rerender", force=True))
+        self.matplotlib_fallback_btn.clicked.connect(self._render_manual_matplotlib_fallback)
         layout.addWidget(self.viz_mode_tabs)
         if hasattr(self, "plot_view") and isinstance(self.plot_view, QWebEngineView):
             self.viz_plot_view = self.plot_view
@@ -662,7 +668,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
             self.card_status.update_card(res["status"], res.get("status_sub", ""))
             self._update_structured_result_views(res.get("pk", {}))
-            self.render_plot(res.get("plot", {}))
+            self._last_plot_spec = res.get("plot", {})
+            self._schedule_render("manual_calculate", force=True)
         except Exception as exc:
             traceback.print_exc()
             message = str(exc).strip() or "Váratlan hiba történt a modellillesztés közben."
@@ -1063,7 +1070,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.card_secondary.update_card(res["secondary"], res.get("status_sub", ""))
             self.card_regimen.update_card(res["regimen"], "Elsődleges javaslat")
             self.card_status.update_card(res["status"], res.get("status_sub", ""))
-            self.render_plot(res["plot"])
+            self._last_plot_spec = res["plot"]
+            self._schedule_render("manual_calculate", force=True)
             self.append_history_record(pk, res)
             self.export_status.setText("Riport elkészült és naplózva lett.")
             self.tabs.setCurrentWidget(self.results_tab)
@@ -1479,7 +1487,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
             print("[DEBUG][PLOT] main tab became visible; rendering deferred plot.")
             self._pending_plot_spec = None
             self._plot_render_deferred = False
-            self.render_plot(pending)
+            self._last_plot_spec = pending
+            self._schedule_render("deferred_resume", force=True)
 
     def _is_plot_view_visible(self) -> bool:
         view = getattr(self, "viz_plot_view", None)
@@ -1494,6 +1503,53 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if not hasattr(self, "tabs") or not hasattr(self, "plot_tab"):
             return True
         return self.tabs.currentWidget() is self.plot_tab
+
+    def _current_render_signature(self) -> tuple:
+        spec = self._last_plot_spec or {}
+        return (
+            str(spec.get("title", "")),
+            bool(hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1),
+            str(self.view_combo.currentText()) if hasattr(self, "view_combo") else "",
+            tuple(
+                bool(getattr(self, name).isChecked())
+                for name in (
+                    "toggle_obs",
+                    "toggle_fit",
+                    "toggle_projection",
+                    "toggle_dose_events",
+                    "toggle_overlay",
+                    "toggle_current_samples",
+                    "toggle_history_samples",
+                    "toggle_regimen_conc",
+                    "toggle_regimen_auc",
+                    "toggle_dose_annotations",
+                )
+                if hasattr(self, name)
+            ),
+        )
+
+    def _schedule_render(self, trigger: str, force: bool = False) -> None:
+        self._last_render_trigger = trigger
+        self._force_next_render = bool(force)
+        print(f"[DEBUG][PLOT] schedule render trigger={trigger} force={force}")
+        timer = getattr(self, "_render_debounce_timer", None)
+        if timer is None:
+            self._render_debounce_timer = QTimer(self)
+            self._render_debounce_timer.setSingleShot(True)
+            self._render_debounce_timer.timeout.connect(self._perform_scheduled_render)
+            timer = self._render_debounce_timer
+        timer.start(120)
+
+    def _perform_scheduled_render(self) -> None:
+        sig = self._current_render_signature()
+        force = bool(getattr(self, "_force_next_render", False))
+        trigger = str(getattr(self, "_last_render_trigger", "unknown"))
+        if (not force) and sig == getattr(self, "_last_requested_render_signature", None):
+            print(f"[DEBUG][PLOT] render skipped by dedup trigger={trigger}")
+            return
+        self._last_requested_render_signature = sig
+        self._force_next_render = False
+        self.render_plot(self._last_plot_spec or {})
 
     def _update_plot_summary(self, single: dict, avg: dict, trace_count: int, renderer_state: str) -> None:
         mode_text = "Model averaging" if (hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1) else "Single model"
@@ -1549,6 +1605,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._plot_renderer_state = "Matplotlib fallback"
         self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
+
+    def _render_manual_matplotlib_fallback(self) -> None:
+        rid = int(getattr(self, "_active_plot_request_id", -1))
+        state = (getattr(self, "_plot_request_states", {}) or {}).get(rid, {})
+        if not state:
+            return
+        print(f"[DEBUG][PLOT] manual matplotlib fallback requested for id={rid}")
+        state["pending"] = True
+        state["succeeded"] = False
+        state["fallback_executed"] = False
+        self._execute_plot_fallback(rid)
 
     def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
         points: list[tuple[float, float, str]] = []
@@ -1742,7 +1809,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
                         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
                         return
-                    self._schedule_plot_fallback(active_id)
+                    state["pending"] = False
+                    self._plot_renderer_state = "Plotly load failed"
+                    self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+                    print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
                 view.loadFinished.connect(_on_load_finished)
                 self._plot_load_finished_hooked = True
         finally:

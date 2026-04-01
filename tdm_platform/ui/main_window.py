@@ -1771,7 +1771,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             print(f"[DEBUG][PLOT] render request started: id={request_id}")
             html = pio.to_html(
                 fig,
-                include_plotlyjs="cdn",
+                include_plotlyjs="inline",
                 full_html=True,
                 default_height="620px",
                 default_width="100%",
@@ -1811,8 +1811,32 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         return
                     print(f"[DEBUG][PLOT] request state before handling: id={active_id} state={state}")
                     if ok:
+                        if hasattr(view, "page"):
+                            def _after_js_probe(js_ok):
+                                if active_id != int(getattr(self, "_active_plot_request_id", -1)):
+                                    return
+                                if not bool(js_ok):
+                                    print(f"[DEBUG][PLOT] JS probe failed; scheduling fallback for id={active_id}")
+                                    self._schedule_plot_fallback(active_id)
+                                    return
+                                timer = getattr(self, "_plot_fallback_timer", None)
+                                if timer is not None and timer.isActive() and getattr(self, "_plot_fallback_request_id", -1) == active_id:
+                                    timer.stop()
+                                    print(f"[DEBUG][PLOT] delayed fallback canceled: id={active_id}")
+                                state["succeeded"] = True
+                                state["pending"] = False
+                                self._plot_renderer_state = "Plotly"
+                                self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+                                print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
+
                         if state.get("fallback_executed"):
                             print(f"[DEBUG][PLOT] late success ignored after fallback: id={active_id}")
+                            return
+                        if hasattr(view, "page"):
+                            view.page().runJavaScript(
+                                "Boolean(window.Plotly && document.getElementById('vanco_plot_chart'))",
+                                _after_js_probe,
+                            )
                             return
                         timer = getattr(self, "_plot_fallback_timer", None)
                         if timer is not None and timer.isActive() and getattr(self, "_plot_fallback_request_id", -1) == active_id:

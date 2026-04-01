@@ -1473,9 +1473,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def _on_main_tabs_changed(self, _idx: int) -> None:
         pending = getattr(self, "_pending_plot_spec", None)
-        if pending is not None:
+        if pending is not None and self._is_visualization_tab_active() and self._is_plot_view_visible():
             print("[DEBUG][PLOT] main tab became visible; rendering deferred plot.")
             self._pending_plot_spec = None
+            self._plot_render_deferred = False
             self.render_plot(pending)
 
     def _is_plot_view_visible(self) -> bool:
@@ -1483,6 +1484,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if view is None:
             return False
         return bool(getattr(view, "isVisible", lambda: True)())
+
+    def _is_visualization_tab_active(self) -> bool:
+        if not hasattr(self, "tabs") or not hasattr(self, "plot_tab"):
+            return True
+        return self.tabs.currentWidget() is self.plot_tab
 
     def _collect_history_sample_points(self) -> list[tuple[float, float, str]]:
         points: list[tuple[float, float, str]] = []
@@ -1507,11 +1513,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 points.append((t_h, c, f"{ts} | {method}"))
         return points
 
-    def _build_dose_event_traces(self, fig: go.Figure, dose_events: list[dict]) -> None:
+    def _build_dose_event_traces(self, fig: go.Figure, dose_events: list[dict], y_anchor: float) -> None:
         color_map = {"loading_dose": "#f59e0b", "maintenance_dose": "#2563eb", "extra_dose": "#ef4444"}
+        grouped: dict[str, list[tuple[float, str]]] = {"loading_dose": [], "maintenance_dose": [], "extra_dose": []}
         for ev in dose_events:
             t = float(ev.get("time", 0.0))
             et = str(ev.get("event_type", "maintenance_dose")).lower()
+            grouped.setdefault(et, []).append((t, f"{et} | dose={ev.get('dose','-')} mg | tinf={ev.get('tinf','-')}h | tau={ev.get('tau','-')}"))
             color = color_map.get(et, "#64748b")
             fig.add_vline(x=t, line_dash="dash", line_color=color, opacity=0.7)
             if hasattr(self, "toggle_dose_annotations") and self.toggle_dose_annotations.isChecked():
@@ -1524,13 +1532,27 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     showarrow=False,
                     font=dict(size=9, color=color),
                 )
+        for et, entries in grouped.items():
+            if not entries:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=[e[0] for e in entries],
+                    y=[y_anchor] * len(entries),
+                    mode="markers",
+                    name=f"Dose: {et}",
+                    marker=dict(size=10, symbol="triangle-down", color=color_map.get(et, "#64748b")),
+                    text=[e[1] for e in entries],
+                    hovertemplate="%{text}<br>t=%{x}h<extra></extra>",
+                )
+            )
 
     def _build_regimen_overlay_traces(self, fig: go.Figure, view_mode: str) -> None:
         if not self.results or not self.results.get("pk"):
             return
         pk = self.results["pk"]
-        if not (hasattr(self, "toggle_regimen_conc") and self.toggle_regimen_conc.isChecked()):
-            return
+        show_conc = bool(hasattr(self, "toggle_regimen_conc") and self.toggle_regimen_conc.isChecked())
+        show_auc = bool(hasattr(self, "toggle_regimen_auc") and self.toggle_regimen_auc.isChecked())
         options = (pk.get("regimen_options") or [])[:3]
         for idx, opt in enumerate(options):
             tau = float(opt.get("tau") or 12.0)
@@ -1539,113 +1561,99 @@ class MainWindow(legacy_ui.TDMMainWindow):
             x = [0.0, tau / 2.0, tau]
             y = [peak, (peak + trough) / 2.0, trough]
             if view_mode == "auc":
-                if not (hasattr(self, "toggle_regimen_auc") and self.toggle_regimen_auc.isChecked()):
+                if not show_auc:
                     continue
                 fig.add_trace(go.Scatter(x=x, y=y, fill="tozeroy", mode="lines", opacity=0.15 if idx else 0.3, name=f"Regimen AUC {idx+1}"))
             else:
+                if not show_conc:
+                    continue
                 fig.add_trace(go.Scatter(x=x, y=y, mode="lines", opacity=0.35 if idx else 0.8, name=f"Regimen {idx+1}: {opt.get('dose',0):.0f} mg q{tau:.0f}h"))
 
     def render_plot(self, spec: dict):
-        self._last_plot_spec = spec or {}
-        if not self._is_plot_view_visible():
-            print("[DEBUG][PLOT] deferred render: view hidden.")
-            self._pending_plot_spec = spec or {}
-            QTimer.singleShot(200, lambda: self._on_main_tabs_changed(-1))
+        if getattr(self, "_plot_render_in_progress", False):
+            print("[DEBUG][PLOT] render skipped: already in progress.")
             return
-        single = spec.get("single_model") or {}
-        avg = spec.get("model_averaging") or {}
-        pred_x = list(single.get("pred_x") or spec.get("current_x", []) or [])
-        pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
-        obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
-        obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
-        dose_events = list(single.get("dose_events") or spec.get("dose_events", []) or [])
-        show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
-        view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"
-        fig = go.Figure()
-        if show_averaging and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
-            for overlay in avg.get("overlays", []):
-                fig.add_trace(go.Scatter(x=overlay.get("x", []), y=overlay.get("y", []), mode="lines", name=f"Avg {overlay.get('label','model')}", opacity=0.55))
-        elif (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()) and pred_x and pred_y:
-            fig.add_trace(go.Scatter(x=pred_x, y=pred_y, mode="lines", name=str(single.get("label") or "Fitted"), line=dict(width=2.5)))
-        if (not hasattr(self, "toggle_current_samples") or self.toggle_current_samples.isChecked()) and obs_x and obs_y:
-            fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Aktuális observed", marker=dict(size=10, color="#16a34a")))
-        if hasattr(self, "toggle_history_samples") and self.toggle_history_samples.isChecked():
-            hp = self._collect_history_sample_points()
-            if hp:
-                fig.add_trace(go.Scatter(x=[p[0] for p in hp], y=[p[1] for p in hp], mode="markers", name="Korábbi beteg minták", marker=dict(size=8, color="#a855f7", symbol="diamond"), text=[p[2] for p in hp], hovertemplate="%{text}<br>t=%{x}h, C=%{y}<extra></extra>"))
-        if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
-            self._build_dose_event_traces(fig, dose_events)
-        if view_mode == "auc" and pred_x and pred_y:
-            fig.add_trace(go.Scatter(x=pred_x, y=pred_y, fill="tozeroy", mode="lines", opacity=0.25, name="AUC area"))
-        self._build_regimen_overlay_traces(fig, view_mode)
-        mic_value = (self.results or {}).get("pk", {}).get("auc_mic")
-        subtitle = f"AUC/MIC: {self._fmt_float(mic_value, 1, na='n.a.')}" if mic_value is not None else "MIC nincs megadva"
-        fig.update_layout(
-            title=f"{spec.get('title', 'Vancomycin PK timeline')} — {'Model averaging' if show_averaging else 'Single model'}<br><sup>{subtitle}</sup>",
-            xaxis_title="Idő (óra)",
-            yaxis_title="Koncentráció (mg/L)" if view_mode == "concentration" else "Expozíció (relatív)",
-            template="plotly_white",
-            margin=dict(l=20, r=20, t=70, b=30),
-            height=620,
-        )
-        view = getattr(self, "viz_plot_view", None)
-        if view is None or not hasattr(view, "setHtml"):
-            return
-        html = pio.to_html(fig, include_plotlyjs="inline", full_html=False, default_height="620px", default_width="100%", div_id="vanco_plot_chart")
+        self._plot_render_in_progress = True
         try:
-            view.setHtml(f"<html><body style='margin:0'>{html}</body></html>", QUrl.fromLocalFile(str(Path.cwd()) + "/"))
-        except TypeError:
-            view.setHtml(f"<html><body style='margin:0'>{html}</body></html>")
-        if hasattr(self, "viz_single"):
-            self.viz_single.setHtml(f"<h3>{single.get('label','Single model')}</h3><p>Trace-ek: {len(fig.data)}</p>")
-        if hasattr(self, "viz_averaging"):
-            self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
-        if hasattr(self, "model_avg_table"):
-            self.model_avg_table.setRowCount(0)
-            for overlay in avg.get("overlays", []):
-                row = self.model_avg_table.rowCount()
-                self.model_avg_table.insertRow(row)
-                vals = [overlay.get("label", "-"), f"{overlay.get('weight', 0):.3f}", f"{overlay.get('rmse', 0):.3f}", f"{overlay.get('mae', 0):.3f}", f"{overlay.get('auc24', '-')}", f"{overlay.get('auc_mic', '-')}"]
-                for col, value in enumerate(vals):
-                    self.model_avg_table.setItem(row, col, QTableWidgetItem(str(value)))
-        if hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
-            def _on_load_finished(ok: bool):
-                print("[DEBUG][PLOT] loadFinished:", ok)
-                if ok:
+            self._last_plot_spec = spec or {}
+            render_signature = (
+                str(spec.get("title", "")),
+                bool(hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1),
+                str(self.view_combo.currentText()) if hasattr(self, "view_combo") else "",
+            )
+            if (not self._is_visualization_tab_active()) or (not self._is_plot_view_visible()):
+                if getattr(self, "_plot_render_deferred", False) and getattr(self, "_last_render_signature", None) == render_signature:
                     return
-                if not self._is_plot_view_visible():
-                    print("[DEBUG][PLOT] loadFinished false while hidden: keep deferred/no fallback.")
-                    return
-                if getattr(self, "_plot_retry_done", False):
-                    if MATPLOTLIB_UI_OK and pred_x and pred_y:
-                        print("[DEBUG][PLOT] fallback reason: visible view + retry failed.")
-                        try:
-                            mfig = plt.figure(figsize=(8, 4), dpi=120)
-                            ax = mfig.add_subplot(111)
-                            ax.plot(pred_x, pred_y, label="Fitted", linewidth=2.0, color="#2563eb")
-                            if obs_x and obs_y:
-                                ax.scatter(obs_x, obs_y, label="Observed", color="#16a34a")
-                            for event in dose_events:
-                                ax.axvline(float(event.get("time", 0.0)), linestyle="--", color="gray", alpha=0.6)
-                            ax.grid(True, alpha=0.3)
-                            ax.legend(loc="best")
-                            buffer = BytesIO()
-                            mfig.tight_layout()
-                            mfig.savefig(buffer, format="png")
-                            plt.close(mfig)
-                            png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-                            view.setHtml(
-                                "<html><body style='margin:0;padding:0;'>"
-                                f"<img src='data:image/png;base64,{png_b64}' style='max-width:100%;height:auto;'/>"
-                                "</body></html>"
-                            )
-                        except Exception as exc:
-                            print("[DEBUG][PLOT] matplotlib fallback failed:", exc)
-                    return
-                self._plot_retry_done = True
-                QTimer.singleShot(120, lambda: self.render_plot(self._last_plot_spec or {}))
-            view.loadFinished.connect(_on_load_finished)
-            self._plot_load_finished_hooked = True
+                self._pending_plot_spec = spec or {}
+                self._plot_render_deferred = True
+                self._last_render_signature = render_signature
+                print("[DEBUG][PLOT] deferred render set.")
+                return
+            self._plot_render_deferred = False
+            single = spec.get("single_model") or {}
+            avg = spec.get("model_averaging") or {}
+            pred_x = list(single.get("pred_x") or spec.get("current_x", []) or [])
+            pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
+            obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
+            obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
+            dose_events = list(single.get("dose_events") or spec.get("dose_events", []) or [])
+            show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
+            view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"
+            fig = go.Figure()
+            if show_averaging and (not hasattr(self, "toggle_overlay") or self.toggle_overlay.isChecked()):
+                for overlay in avg.get("overlays", []):
+                    fig.add_trace(go.Scatter(x=overlay.get("x", []), y=overlay.get("y", []), mode="lines", name=f"Avg {overlay.get('label','model')}", opacity=0.55))
+            elif (not hasattr(self, "toggle_fit") or self.toggle_fit.isChecked()) and pred_x and pred_y:
+                fig.add_trace(go.Scatter(x=pred_x, y=pred_y, mode="lines", name=str(single.get("label") or "Fitted"), line=dict(width=2.5)))
+            observed_master = not hasattr(self, "toggle_obs") or self.toggle_obs.isChecked()
+            if observed_master and (not hasattr(self, "toggle_current_samples") or self.toggle_current_samples.isChecked()) and obs_x and obs_y:
+                fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Aktuális observed", marker=dict(size=10, color="#16a34a")))
+            if observed_master and hasattr(self, "toggle_history_samples") and self.toggle_history_samples.isChecked():
+                hp = self._collect_history_sample_points()
+                if hp:
+                    fig.add_trace(go.Scatter(x=[p[0] for p in hp], y=[p[1] for p in hp], mode="markers", name="Korábbi beteg minták", marker=dict(size=8, color="#a855f7", symbol="diamond"), text=[p[2] for p in hp], hovertemplate="%{text}<br>t=%{x}h, C=%{y}<extra></extra>"))
+            if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
+                self._build_dose_event_traces(fig, dose_events, max(pred_y + obs_y + [1.0]) * 1.05)
+            if view_mode == "auc" and pred_x and pred_y:
+                fig.add_trace(go.Scatter(x=pred_x, y=pred_y, fill="tozeroy", mode="lines", opacity=0.25, name="AUC area"))
+            self._build_regimen_overlay_traces(fig, view_mode)
+            mic_value = (self.results or {}).get("pk", {}).get("auc_mic")
+            subtitle = f"AUC/MIC: {self._fmt_float(mic_value, 1, na='n.a.')}" if mic_value is not None else "MIC nincs megadva"
+            fig.update_layout(title=f"{spec.get('title', 'Vancomycin PK timeline')} — {'Model averaging' if show_averaging else 'Single model'}<br><sup>{subtitle}</sup>", xaxis_title="Idő (óra)", yaxis_title="Koncentráció (mg/L)" if view_mode == "concentration" else "Expozíció (relatív)", template="plotly_white", margin=dict(l=20, r=20, t=70, b=30), height=620)
+            view = getattr(self, "viz_plot_view", None)
+            if view is None or not hasattr(view, "setHtml"):
+                return
+            html = pio.to_html(fig, include_plotlyjs="inline", full_html=False, default_height="620px", default_width="100%", div_id="vanco_plot_chart")
+            try:
+                view.setHtml(f"<html><body style='margin:0'>{html}</body></html>", QUrl.fromLocalFile(str(Path.cwd()) + "/"))
+            except TypeError:
+                view.setHtml(f"<html><body style='margin:0'>{html}</body></html>")
+            self._plot_renderer_state = "Plotly"
+            self._plot_retry_done = False
+            if hasattr(self, "viz_single"):
+                self.viz_single.setHtml(f"<h3>{single.get('label','Single model')}</h3><p>Renderer: {self._plot_renderer_state} | Trace-ek: {len(fig.data)}</p>")
+            if hasattr(self, "viz_averaging"):
+                self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
+            if hasattr(view, "loadFinished") and not getattr(self, "_plot_load_finished_hooked", False):
+                def _on_load_finished(ok: bool):
+                    if ok or not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK or not pred_x or not pred_y:
+                        return
+                    mfig = plt.figure(figsize=(8, 4), dpi=120)
+                    ax = mfig.add_subplot(111)
+                    ax.plot(pred_x, pred_y, linewidth=2.0, color="#2563eb")
+                    if obs_x and obs_y:
+                        ax.scatter(obs_x, obs_y, color="#16a34a")
+                    buffer = BytesIO()
+                    mfig.tight_layout()
+                    mfig.savefig(buffer, format="png")
+                    plt.close(mfig)
+                    png_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                    view.setHtml(f"<img src='data:image/png;base64,{png_b64}'/>")
+                    self._plot_renderer_state = "Matplotlib fallback"
+                view.loadFinished.connect(_on_load_finished)
+                self._plot_load_finished_hooked = True
+        finally:
+            self._plot_render_in_progress = False
 
     def calc_vancomycin(self, pk: dict, method: str) -> dict:
         print(f"[DEBUG][UI] calc_vancomycin input_method={method}")

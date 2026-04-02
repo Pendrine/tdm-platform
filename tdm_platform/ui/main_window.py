@@ -1897,8 +1897,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
             tau = float(opt.get("tau") or 12.0)
             peak = float(opt.get("peak") or 0.0)
             trough = float(opt.get("trough") or 0.0)
-            x = [0.0, tau / 2.0, tau]
-            y = [peak, (peak + trough) / 2.0, trough]
+            tinf = float(opt.get("tinf") or 1.0)
+            n = 60
+            x = [tau * i / (n - 1) for i in range(n)]
+            y: list[float] = []
+            ke = max(1e-6, math.log(max(peak, 1e-6) / max(trough, 1e-6)) / max(tau - tinf, 1e-6))
+            raw_tau = math.exp(-ke * max(tau - tinf, 1e-6))
+            for t in x:
+                if t <= tinf:
+                    c = trough + (peak - trough) * (t / max(tinf, 1e-6))
+                else:
+                    raw = math.exp(-ke * (t - tinf))
+                    c = trough + (peak - trough) * ((raw - raw_tau) / max(1e-6, (1.0 - raw_tau)))
+                y.append(max(0.0, c))
             if view_mode == "auc":
                 if not show_auc:
                     continue
@@ -1907,6 +1918,51 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 if not show_conc:
                     continue
                 fig.add_trace(go.Scatter(x=x, y=y, mode="lines", opacity=0.35 if idx else 0.8, name=f"Regimen {idx+1}: {opt.get('dose',0):.0f} mg q{tau:.0f}h"))
+
+    def _align_curve_with_timeline(self, pred_x: list[float], pred_y: list[float], dose_events: list[dict], obs_x: list[float]) -> tuple[list[float], list[float]]:
+        if not pred_x or not pred_y or len(pred_x) != len(pred_y):
+            return pred_x, pred_y
+        x = [float(v) for v in pred_x]
+        y = [max(0.0, float(v)) for v in pred_y]
+        x_end = max(x)
+        dose_times = [self._safe_optional_float(ev.get("time")) for ev in dose_events]
+        dose_times = [float(t) for t in dose_times if t is not None]
+        obs_times = [self._safe_optional_float(t) for t in obs_x]
+        obs_times = [float(t) for t in obs_times if t is not None]
+        tau_h = self._safe_optional_float((self._last_pk_payload or {}).get("tau")) or 12.0
+        target_end = max([x_end] + dose_times + obs_times) + max(0.25 * tau_h, 2.0)
+        if target_end <= x_end + 1e-6:
+            return x, y
+        if len(x) >= 2 and y[-1] > 0 and y[-2] > 0:
+            dt = max(1e-6, x[-1] - x[-2])
+            ke_tail = max(1e-6, math.log(y[-2] / y[-1]) / dt)
+        else:
+            ke_tail = 0.12
+        step = max(0.25, tau_h / 24.0)
+        cur = x_end + step
+        while cur <= target_end + 1e-6:
+            y_val = y[-1] * math.exp(-ke_tail * (cur - x[-1]))
+            x.append(cur)
+            y.append(max(0.0, y_val))
+            cur += step
+        first_dose_t = min(dose_times) if dose_times else 0.0
+        tinf_h = self._safe_optional_float((self._last_pk_payload or {}).get("tinf")) or 1.0
+        if first_dose_t < x[0]:
+            start_c = max(0.0, min(y))
+            lead_x = []
+            lead_y = []
+            cur = first_dose_t
+            while cur < x[0]:
+                if cur <= first_dose_t + tinf_h:
+                    c = start_c + (y[0] - start_c) * ((cur - first_dose_t) / max(tinf_h, 1e-6))
+                else:
+                    c = y[0] * math.exp(-ke_tail * (x[0] - cur))
+                lead_x.append(cur)
+                lead_y.append(max(0.0, c))
+                cur += step
+            x = lead_x + x
+            y = lead_y + y
+        return x, y
 
     def render_plot(self, spec: dict):
         if getattr(self, "_plot_render_in_progress", False):
@@ -1946,6 +2002,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 [float(x) for x in obs_time_points if x is not None],
                 [float(x) for x in pred_time_points if x is not None],
             )
+            if pred_x and pred_y:
+                pred_x, pred_y = self._align_curve_with_timeline(pred_x, pred_y, dose_events, obs_x)
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
             view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"
             fig = go.Figure()

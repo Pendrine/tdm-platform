@@ -1724,6 +1724,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
         current_event_dts = [dt for dt in current_event_dts if dt is not None]
         window_start = min(current_event_dts) if current_event_dts else None
         window_end = max(current_event_dts) if current_event_dts else None
+        if ref_dt is None or window_start is None or window_end is None:
+            return points
         for row in self.history_data or []:
             if str(row.get("drug", "")).lower() != "vancomycin":
                 continue
@@ -1735,11 +1737,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
             for ev in events:
                 if "sample" not in str(ev.get("event_type", "")).lower():
                     continue
-                t_h = self._safe_optional_float(ev.get("time_h"))
                 c = self._safe_optional_float(ev.get("level_mg_l"))
-                if t_h is None or c is None:
-                    if c is None:
-                        continue
+                if c is None:
+                    continue
                 event_dt = str(
                     ev.get("event_datetime")
                     or ev.get("sample_datetime")
@@ -1748,13 +1748,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     or ""
                 ).strip()
                 event_dt_obj = self._parse_event_datetime(event_dt)
-                if window_start is not None and window_end is not None and event_dt_obj is not None:
-                    if event_dt_obj < (window_start - timedelta(hours=12)) or event_dt_obj > (window_end + timedelta(hours=12)):
-                        continue
-                if ref_dt is not None and event_dt_obj is not None:
-                    t_h = (event_dt_obj - ref_dt).total_seconds() / 3600.0
-                if t_h is None:
+                if event_dt_obj is None:
                     continue
+                if event_dt_obj < window_start or event_dt_obj > window_end:
+                    continue
+                t_h = (event_dt_obj - ref_dt).total_seconds() / 3600.0
                 points.append(
                     {
                         "time_h": t_h,
@@ -1762,6 +1760,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                         "episode_ts": ts,
                         "event_dt": event_dt,
                         "method": method,
+                        "user": str(row.get("user", "")).strip(),
+                        "patient_id": str(row.get("patient_id", "")).strip(),
                     }
                 )
         return points
@@ -1985,13 +1985,13 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def _align_curve_with_timeline(self, pred_x: list[float], pred_y: list[float], dose_events: list[dict], obs_x: list[float]) -> tuple[list[float], list[float]]:
         if not pred_x or not pred_y or len(pred_x) != len(pred_y):
             return pred_x, pred_y
-        x = [float(v) for v in pred_x]
+        x = [max(0.0, float(v)) for v in pred_x]
         y = [max(0.0, float(v)) for v in pred_y]
         x_end = max(x)
         dose_times = [self._safe_optional_float(ev.get("time")) for ev in dose_events]
-        dose_times = [float(t) for t in dose_times if t is not None]
+        dose_times = [float(t) for t in dose_times if t is not None and float(t) >= 0.0]
         obs_times = [self._safe_optional_float(t) for t in obs_x]
-        obs_times = [float(t) for t in obs_times if t is not None]
+        obs_times = [float(t) for t in obs_times if t is not None and float(t) >= 0.0]
         tau_h = self._safe_optional_float((self._last_pk_payload or {}).get("tau")) or 12.0
         target_end = max([x_end] + dose_times + obs_times) + max(0.25 * tau_h, 2.0)
         if target_end <= x_end + 1e-6:
@@ -2008,23 +2008,6 @@ class MainWindow(legacy_ui.TDMMainWindow):
             x.append(cur)
             y.append(max(0.0, y_val))
             cur += step
-        first_dose_t = min(dose_times) if dose_times else 0.0
-        tinf_h = self._safe_optional_float((self._last_pk_payload or {}).get("tinf")) or 1.0
-        if first_dose_t < x[0]:
-            start_c = max(0.0, min(y))
-            lead_x = []
-            lead_y = []
-            cur = first_dose_t
-            while cur < x[0]:
-                if cur <= first_dose_t + tinf_h:
-                    c = start_c + (y[0] - start_c) * ((cur - first_dose_t) / max(tinf_h, 1e-6))
-                else:
-                    c = y[0] * math.exp(-ke_tail * (x[0] - cur))
-                lead_x.append(cur)
-                lead_y.append(max(0.0, c))
-                cur += step
-            x = lead_x + x
-            y = lead_y + y
         return x, y
 
     def render_plot(self, spec: dict):
@@ -2080,6 +2063,8 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Aktuális observed", marker=dict(size=10, color="#16a34a")))
             if observed_master and hasattr(self, "toggle_history_samples") and self.toggle_history_samples.isChecked():
                 hp = self._collect_history_sample_points()
+                history_horizon = max([0.0] + [float(v) for v in pred_x if isinstance(v, (int, float))] + [float(v) for v in obs_x if isinstance(v, (int, float))]) if (pred_x or obs_x) else 0.0
+                hp = [p for p in hp if 0.0 <= float(p.get("time_h", 0.0)) <= history_horizon + 1e-6]
                 if hp:
                     fig.add_trace(
                         go.Scatter(
@@ -2089,7 +2074,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                             name="Korábbi beteg minták",
                             marker=dict(size=8, color="#a855f7", symbol="diamond"),
                             text=[
-                                f"{p.get('episode_ts','-')} | {p.get('method','-')} | sample_dt={p.get('event_dt','-')}"
+                                f"sample_dt={p.get('event_dt','-')} | episode_ts={p.get('episode_ts','-')} | method={p.get('method','-')} | user={p.get('user','-')} | patient_id={p.get('patient_id','-')}"
                                 for p in hp
                             ],
                             hovertemplate="%{text}<br>t=%{x}h, C=%{y}<extra></extra>",

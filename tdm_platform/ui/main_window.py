@@ -1768,12 +1768,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def _build_dose_event_traces(self, fig: go.Figure, dose_events: list[dict], y_anchor: float) -> None:
         color_map = {"loading_dose": "#f59e0b", "maintenance_dose": "#2563eb", "extra_dose": "#ef4444"}
+        label_map = {"loading_dose": "loading dose", "maintenance_dose": "maintenance dose", "extra_dose": "extra dose"}
         grouped: dict[str, list[tuple[float, str]]] = {"loading_dose": [], "maintenance_dose": [], "extra_dose": []}
         for ev in dose_events:
             t = float(ev.get("time", ev.get("time_h", 0.0)) or 0.0)
-            et = str(ev.get("event_type", "maintenance_dose")).lower()
+            et = self._normalize_dose_event_type(ev.get("event_type", "maintenance_dose"))
             event_dt = str(ev.get("event_datetime") or ev.get("timestamp") or "-")
-            grouped.setdefault(et, []).append((t, f"{et} | dose={ev.get('dose','-')} mg | tinf={ev.get('tinf','-')}h | tau={ev.get('tau','-')} | dt={event_dt}"))
+            dose_value = ev.get("dose", ev.get("dose_mg", "-"))
+            grouped.setdefault(et, []).append((t, f"{label_map.get(et, et)} | dose={dose_value} mg | tinf={ev.get('tinf','-')}h | tau={ev.get('tau','-')} | dt={event_dt}"))
             color = color_map.get(et, "#64748b")
             fig.add_vline(x=t, line_dash="dash", line_color=color, opacity=0.7)
             if hasattr(self, "toggle_dose_annotations") and self.toggle_dose_annotations.isChecked():
@@ -1782,7 +1784,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     y=1.02,
                     xref="x",
                     yref="paper",
-                    text=f"{et}<br>{ev.get('dose','-')} mg",
+                    text=f"{label_map.get(et, et)}<br>{dose_value} mg",
                     showarrow=False,
                     font=dict(size=9, color=color),
                 )
@@ -1800,6 +1802,17 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     hovertemplate="%{text}<br>t=%{x}h<extra></extra>",
                 )
             )
+
+    @staticmethod
+    def _normalize_dose_event_type(raw_type: object) -> str:
+        txt = str(raw_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if "loading" in txt:
+            return "loading_dose"
+        if "extra" in txt:
+            return "extra_dose"
+        if "maint" in txt or "dose" in txt:
+            return "maintenance_dose"
+        return "maintenance_dose"
 
     def _expand_dose_events_for_plot(self, dose_events: list[dict], obs_x: list[float], pred_x: list[float]) -> list[dict]:
         payload = self._last_pk_payload or {}
@@ -1823,7 +1836,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 t_val = self._safe_optional_float(raw.get("time_h"))
             if t_val is None:
                 return
-            et = str(raw.get("event_type", "maintenance_dose")).lower() or "maintenance_dose"
+            et = self._normalize_dose_event_type(raw.get("event_type", "maintenance_dose"))
             key = (round(float(t_val), 4), et)
             if key in seen:
                 return

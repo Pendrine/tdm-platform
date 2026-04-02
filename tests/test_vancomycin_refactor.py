@@ -577,3 +577,35 @@ def test_classical_path_plot_payload_keeps_legacy_keys():
     assert len(single.get("pred_y", [])) >= 80
     assert len(single.get("pred_x", [])) > len(single.get("obs_x", []))
     assert plot.get("metadata", {}).get("mode") == "trapezoid_classic"
+
+
+def test_classical_curve_keeps_negative_loading_event_and_stable_scale():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=23.5,
+            t1_start_h=2,
+            c2=8.0,
+            t2_start_h=11,
+            method="Klasszikus",
+            episode_events=[
+                {"event_type": "loading_dose", "time_h": -12, "dose_mg": 1500, "tinf_h": 2},
+                {"event_type": "maintenance_dose", "time_h": 0, "dose_mg": 1000, "tinf_h": 1},
+                {"event_type": "sample", "time_h": 2, "level_mg_l": 23.5},
+                {"event_type": "sample", "time_h": 11, "level_mg_l": 8.0},
+            ],
+        )
+    )
+    plot = result["plot"]
+    single = plot["single_model"]
+    dose_times = [float(ev.get("time", 0.0)) for ev in single.get("dose_events", [])]
+    assert min(dose_times) <= -12.0
+    assert 0.0 in dose_times
+    assert min(single.get("pred_x", [0.0])) <= -12.0
+    assert max(single.get("pred_y", [0.0])) <= 1e6

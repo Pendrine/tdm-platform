@@ -89,18 +89,17 @@ def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
             t_h = float(event.get("time_h", 0.0))
         except (TypeError, ValueError):
             continue
-        if 0.0 <= t_h <= tau_h:
-            if t_h <= tau_h:
-                dose_events.append(
-                    {
-                        "time": t_h,
-                        "event_type": kind or "maintenance_dose",
-                        "dose": event.get("dose_mg", inp.dose_mg),
-                        "tinf": event.get("tinf_h", inp.tinf_h),
-                        "tau": inp.tau_h,
-                        "event_datetime": event.get("event_datetime"),
-                    }
-                )
+        if t_h <= tau_h:
+            dose_events.append(
+                {
+                    "time": t_h,
+                    "event_type": kind or "maintenance_dose",
+                    "dose": event.get("dose_mg", inp.dose_mg),
+                    "tinf": event.get("tinf_h", inp.tinf_h),
+                    "tau": inp.tau_h,
+                    "event_datetime": event.get("event_datetime"),
+                }
+            )
     if not dose_events:
         dose_events.append(
             {
@@ -153,19 +152,38 @@ def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
 
     r1 = max(_interp(pred_x, raw_y, t1), 1e-9)
     r2 = max(_interp(pred_x, raw_y, t2), 1e-9)
-    ln_corr1 = math.log(c1 / r1)
-    ln_corr2 = math.log(c2 / r2)
-    b_corr = (ln_corr1 - ln_corr2) / max(1e-9, (t1 - t2))
-    a_corr = ln_corr1 + b_corr * t1
+    use_correction = bool(r1 > 1e-6 and r2 > 1e-6 and abs(t2 - t1) > 1e-6)
+    if use_correction:
+        ln_corr1 = math.log(c1 / r1)
+        ln_corr2 = math.log(c2 / r2)
+        b_corr = (ln_corr1 - ln_corr2) / max(1e-9, (t1 - t2))
+        a_corr = ln_corr1 + b_corr * t1
+    else:
+        a_corr = 0.0
+        b_corr = 0.0
     pred_y: list[float] = []
     for raw, t in zip(raw_y, pred_x):
-        exp_term = a_corr - b_corr * t
-        exp_term = max(-50.0, min(50.0, exp_term))
-        pred_y.append(max(0.0, raw * math.exp(exp_term)))
+        if use_correction:
+            exp_term = a_corr - b_corr * t
+            exp_term = max(-12.0, min(12.0, exp_term))
+            y_val = raw * math.exp(exp_term)
+        else:
+            y_val = raw
+        pred_y.append(max(0.0, min(float(y_val), 1e6)))
+    if not any(v > 0 for v in pred_y):
+        pred_y = [max(0.0, min(v, 1e6)) for v in raw_y]
 
     obs_x = [float(inp.t1_start_h), float(inp.t2_start_h)]
     obs_y = [float(inp.c1), float(inp.c2)]
     curve_label = "Klasszikus trapezoid (first dose)" if int(inp.dose_number or 0) <= 1 else "Klasszikus trapezoid (steady-state)"
+    print(
+        "[DEBUG][ENGINE][CLASSIC] single_model dose_events:",
+        [{"time": ev.get("time"), "event_type": ev.get("event_type"), "dose": ev.get("dose")} for ev in dose_events],
+    )
+    print(
+        "[DEBUG][ENGINE][CLASSIC] pred range:",
+        {"x_min": min(pred_x) if pred_x else None, "x_max": max(pred_x) if pred_x else None, "y_min": min(pred_y) if pred_y else None, "y_max": max(pred_y) if pred_y else None, "use_correction": use_correction},
+    )
     return {
         "title": "Vancomycin klasszikus koncentráció-idő profil",
         "single_model": {

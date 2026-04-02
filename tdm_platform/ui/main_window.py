@@ -2091,8 +2091,16 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 [float(x) for x in obs_time_points if x is not None],
                 [float(x) for x in pred_time_points if x is not None],
             )
-            if pred_x and pred_y:
+            metadata_mode = str((spec.get("metadata") or {}).get("mode", "")).lower()
+            is_classical_mode = metadata_mode == "trapezoid_classic" or "klasszikus" in str((single or {}).get("label", "")).lower()
+            if pred_x and pred_y and not is_classical_mode:
                 pred_x, pred_y = self._align_curve_with_timeline(pred_x, pred_y, dose_events, obs_x)
+            elif is_classical_mode:
+                print("[DEBUG][PLOT] classical mode: UI timeline stitching skipped (engine payload used as-is)")
+            print(
+                "[DEBUG][PLOT] final pred range:",
+                {"x_min": min(pred_x) if pred_x else None, "x_max": max(pred_x) if pred_x else None, "y_min": min(pred_y) if pred_y else None, "y_max": max(pred_y) if pred_y else None},
+            )
             show_averaging = hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1
             view_mode = "auc" if hasattr(self, "view_combo") and self.view_combo.currentText() == "AUC" else "concentration"
             fig = go.Figure()

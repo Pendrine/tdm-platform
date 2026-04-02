@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from tdm_platform.pk.common import UMOL_PER_MGDL_CREATININE, cockcroft_gault, posterior_blend, predict_one_compartment, validate_two_point_levels
+from tdm_platform.pk.vancomycin.weights import build_weight_metrics
 from tdm_platform.pk.vancomycin.r_backend_adapter import build_r_input, map_r_output_to_plot_payload, run_r_engine
 from tdm_platform.pk.vancomycin.workflow import run_vancomycin_workflow
 
@@ -71,6 +72,195 @@ def calc_auc_trapezoid(inp: VancomycinInputs) -> dict[str, float]:
     }
 
 
+def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
+    tau_h = max(float(inp.tau_h), 1e-6)
+    default_tinf_h = max(min(float(inp.tinf_h), tau_h), 1e-6)
+    ke = max(float(base.get("ke") or 0.0), 1e-6)
+    cl_l_h = max(float(base.get("cl_l_h") or 0.0), 1e-6)
+    true_trough = max(float(base.get("true_trough") or 0.0), 0.0)
+
+    n_points = 100
+    dose_events: list[dict] = []
+    for event in inp.episode_events or []:
+        kind = str(event.get("event_type", "")).strip().lower().replace(" ", "_").replace("-", "_")
+        if "dose" not in kind:
+            continue
+        try:
+            t_h = float(event.get("time_h", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if t_h <= tau_h:
+            dose_events.append(
+                {
+                    "time": t_h,
+                    "event_type": kind or "maintenance_dose",
+                    "dose": event.get("dose_mg", inp.dose_mg),
+                    "tinf": event.get("tinf_h", inp.tinf_h),
+                    "tau": inp.tau_h,
+                    "event_datetime": event.get("event_datetime"),
+                }
+            )
+    if not dose_events:
+        dose_events.append(
+            {
+                "time": 0.0,
+                "event_type": "maintenance_dose",
+                "dose": inp.dose_mg,
+                "tinf": default_tinf_h,
+                "tau": inp.tau_h,
+            }
+        )
+    dose_events = sorted(dose_events, key=lambda ev: float(ev.get("time", 0.0)))
+    curve_start = min([0.0] + [float(ev.get("time", 0.0)) for ev in dose_events])
+    pred_x = [curve_start + (tau_h - curve_start) * i / (n_points - 1) for i in range(n_points)]
+
+    def _dose_contrib(t: float, dose: float, tinf: float, t0: float) -> float:
+        if t <= t0:
+            return 0.0
+        r0 = dose / max(tinf, 1e-6)
+        if t <= t0 + tinf:
+            return (r0 / cl_l_h) * (1.0 - math.exp(-ke * (t - t0)))
+        return (r0 / cl_l_h) * (1.0 - math.exp(-ke * tinf)) * math.exp(-ke * (t - t0 - tinf))
+
+    raw_y: list[float] = []
+    for t in pred_x:
+        c = 0.0
+        for ev in dose_events:
+            d = max(float(ev.get("dose") or 0.0), 0.0)
+            tinf = max(min(float(ev.get("tinf") or default_tinf_h), tau_h), 1e-6)
+            t0 = float(ev.get("time", 0.0))
+            c += _dose_contrib(t, d, tinf, t0)
+        raw_y.append(max(0.0, c))
+
+    t1 = float(inp.t1_start_h)
+    t2 = float(inp.t2_start_h)
+    c1 = max(float(inp.c1), 1e-9)
+    c2 = max(float(inp.c2), 1e-9)
+
+    def _interp(arr_x: list[float], arr_y: list[float], t: float) -> float:
+        if t <= arr_x[0]:
+            return arr_y[0]
+        if t >= arr_x[-1]:
+            return arr_y[-1]
+        for i in range(1, len(arr_x)):
+            if t <= arr_x[i]:
+                x0, x1 = arr_x[i - 1], arr_x[i]
+                y0, y1 = arr_y[i - 1], arr_y[i]
+                ratio = (t - x0) / max(1e-9, (x1 - x0))
+                return y0 + (y1 - y0) * ratio
+        return arr_y[-1]
+
+    eps = 1e-6
+    r1 = float(_interp(pred_x, raw_y, t1))
+    r2 = float(_interp(pred_x, raw_y, t2))
+    raw_valid = (
+        math.isfinite(r1)
+        and math.isfinite(r2)
+        and r1 > eps
+        and r2 > eps
+        and abs(t2 - t1) > 1e-6
+    )
+    correction_mode = "none"
+    correction_applied = False
+    fallback_used = False
+    a_corr = 0.0
+    b_corr = 0.0
+    pred_y: list[float] = list(raw_y)
+    if raw_valid:
+        ln_corr1 = math.log(c1 / r1)
+        ln_corr2 = math.log(c2 / r2)
+        ratio_gap = abs(ln_corr1 - ln_corr2)
+        if ratio_gap <= 3.0 and abs(ln_corr1) <= 4.0 and abs(ln_corr2) <= 4.0:
+            dt_obs = max(abs(t2 - t1), 1e-9)
+            b_corr = (ln_corr2 - ln_corr1) / dt_obs
+            a_corr = ln_corr1 - b_corr * t1
+            if math.isfinite(a_corr) and math.isfinite(b_corr) and abs(b_corr) <= 0.6:
+                correction_mode = "bounded_log_linear"
+                correction_applied = True
+                corrected: list[float] = []
+                for raw, t in zip(raw_y, pred_x):
+                    exp_term = max(-2.5, min(2.5, a_corr + b_corr * t))
+                    y_val = raw * math.exp(exp_term)
+                    corrected.append(max(0.0, y_val))
+                cmax = max(corrected) if corrected else 0.0
+                if not math.isfinite(cmax) or cmax > 500.0:
+                    correction_applied = False
+                    fallback_used = True
+                else:
+                    pred_y = corrected
+            else:
+                fallback_used = True
+        else:
+            fallback_used = True
+    else:
+        fallback_used = True
+
+    if not correction_applied:
+        print("[DEBUG][ENGINE][CLASSIC] correction skipped because invalid/unstable raw anchors")
+    pred_y = [max(0.0, min(float(v), 1e6)) if math.isfinite(float(v)) else 0.0 for v in pred_y]
+    if not any(v > 0 for v in pred_y):
+        pred_y = [max(0.0, min(float(v), 1e6)) if math.isfinite(float(v)) else 0.0 for v in raw_y]
+        fallback_used = True
+
+    obs_x = [float(inp.t1_start_h), float(inp.t2_start_h)]
+    obs_y = [float(inp.c1), float(inp.c2)]
+    has_loading = any(str(ev.get("event_type", "")).lower() == "loading_dose" and float(ev.get("time", 0.0)) < 0.0 for ev in dose_events)
+    if has_loading and int(inp.dose_number or 0) <= 2:
+        curve_label = "Klasszikus trapezoid (loading + early maintenance)"
+    elif int(inp.dose_number or 0) <= 1:
+        curve_label = "Klasszikus trapezoid (first dose)"
+    else:
+        curve_label = "Klasszikus trapezoid (steady-state)"
+    print("[DEBUG][ENGINE][CLASSIC] raw_at_t1:", r1)
+    print("[DEBUG][ENGINE][CLASSIC] raw_at_t2:", r2)
+    print("[DEBUG][ENGINE][CLASSIC] correction_mode:", correction_mode)
+    print("[DEBUG][ENGINE][CLASSIC] correction_applied:", correction_applied)
+    print("[DEBUG][ENGINE][CLASSIC] fallback_used:", fallback_used)
+    print("[DEBUG][ENGINE][CLASSIC] exponent_a:", a_corr)
+    print("[DEBUG][ENGINE][CLASSIC] exponent_b:", b_corr)
+    print(
+        "[DEBUG][ENGINE][CLASSIC] corrected_range:",
+        {"y_min": min(pred_y) if pred_y else None, "y_max": max(pred_y) if pred_y else None},
+    )
+    print(
+        "[DEBUG][ENGINE][CLASSIC] single_model dose_events:",
+        [{"time": ev.get("time"), "event_type": ev.get("event_type"), "dose": ev.get("dose")} for ev in dose_events],
+    )
+    print(
+        "[DEBUG][ENGINE][CLASSIC] pred range:",
+        {
+            "x_min": min(pred_x) if pred_x else None,
+            "x_max": max(pred_x) if pred_x else None,
+            "y_min": min(pred_y) if pred_y else None,
+            "y_max": max(pred_y) if pred_y else None,
+            "use_correction": correction_applied,
+        },
+    )
+    return {
+        "title": "Vancomycin klasszikus koncentráció-idő profil",
+        "single_model": {
+            "label": curve_label,
+            "pred_x": pred_x,
+            "pred_y": pred_y,
+            "obs_x": obs_x,
+            "obs_y": obs_y,
+            "dose_events": dose_events,
+            "fit": {"engine": "classical_piecewise"},
+        },
+        "model_averaging": {"overlays": []},
+        "current_x": pred_x,
+        "current_y": pred_y,
+        "best_x": pred_x,
+        "best_y": pred_y,
+        "obs_x": obs_x,
+        "obs_y": obs_y,
+        "dose_events": dose_events,
+        "metadata": {"mode": "trapezoid_classic", "start_concentration": true_trough if int(inp.dose_number or 0) > 1 else 0.0},
+        "warnings": [],
+        "errors": [],
+    }
+
+
 def infusion_time_from_dose_hours(dose_mg: float) -> float:
     if dose_mg <= 1000:
         return 1.0
@@ -91,30 +281,274 @@ def practical_intervals_by_crcl(crcl: float) -> list[int]:
     return [48]
 
 
-def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, rounding_mg: float) -> dict:
+def _extract_sample_points(inp: VancomycinInputs) -> list[tuple[float, float]]:
+    samples: list[tuple[float, float]] = []
+    for event in inp.episode_events or []:
+        if str(event.get("event_type", "")).lower() != "sample":
+            continue
+        t_h = event.get("time_h")
+        level = event.get("level_mg_l")
+        if t_h is None or level is None:
+            continue
+        try:
+            t_val = float(t_h)
+            c_val = float(level)
+        except (TypeError, ValueError):
+            continue
+        if t_val >= 0.0 and c_val > 0.0:
+            samples.append((t_val, c_val))
+    if len(samples) < 2:
+        samples = [(float(inp.t1_start_h), float(inp.c1)), (float(inp.t2_start_h), float(inp.c2))]
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
+def _ke_consistency_label(samples: list[tuple[float, float]]) -> str | None:
+    if len(samples) < 3:
+        return "not_available"
+    (t1, c1), (t2, c2), (t3, c3) = samples[:3]
+    if c1 <= 0 or c2 <= 0 or c3 <= 0 or t2 <= t1 or t3 <= t2:
+        return "not_available"
+    ke_1 = math.log(c1 / c2) / (t2 - t1)
+    ke_2 = math.log(c2 / c3) / (t3 - t2)
+    mean_ke = max(1e-6, (ke_1 + ke_2) / 2.0)
+    rel_diff = abs(ke_1 - ke_2) / mean_ke
+    if rel_diff <= 0.25:
+        return "consistent"
+    if rel_diff <= 0.5:
+        return "borderline"
+    return "inconsistent"
+
+
+def _resolve_dose_number(inp: VancomycinInputs) -> int | None:
+    if int(inp.dose_number or 0) > 0:
+        return int(inp.dose_number)
+    inferred = 0
+    for event in inp.episode_events or []:
+        kind = str(event.get("event_type", "")).lower()
+        if "dose" in kind:
+            inferred += 1
+    return inferred or None
+
+
+def _build_weight_metrics_payload(inp: VancomycinInputs, vd_l: float) -> dict:
+    metrics = build_weight_metrics(inp.sex, inp.height_cm, inp.weight_kg)
+    return {
+        "abw_kg": metrics.tbw_kg,
+        "ibw_kg": metrics.ibw_kg,
+        "adjbw_kg": metrics.adjbw_kg,
+        "obesity_by_weight_metric": metrics.obesity_flag,
+        "vd_l_per_kg_actual": (vd_l / metrics.tbw_kg) if metrics.tbw_kg > 0 else None,
+        "vd_l_per_kg_ideal": (vd_l / metrics.ibw_kg) if metrics.ibw_kg > 0 else None,
+        "vd_l_per_kg_adjusted": (vd_l / metrics.adjbw_kg) if metrics.adjbw_kg > 0 else None,
+    }
+
+
+def _build_distribution_assessment(inp: VancomycinInputs, vd_l: float, crcl: float) -> dict:
+    weights = _build_weight_metrics_payload(inp, vd_l)
+    dose_number = _resolve_dose_number(inp)
+    early_sampling_flag = float(inp.t1_start_h) <= float(inp.tinf_h) + 1.0
+    clinical_flags = []
+    if inp.icu:
+        clinical_flags.append("icu")
+    if inp.unstable_renal:
+        clinical_flags.append("unstable_renal")
+    if inp.hematology:
+        clinical_flags.append("hematology")
+    if inp.hsct:
+        clinical_flags.append("hsct")
+    if inp.obesity or bool(weights.get("obesity_by_weight_metric")):
+        clinical_flags.append("obesity")
+    if crcl >= 130:
+        clinical_flags.append("arc")
+    ke_consistency = _ke_consistency_label(_extract_sample_points(inp))
+
+    reason_lines: list[str] = []
+    red_flags: list[str] = []
+    risk_score = 0
+    vd_act = weights.get("vd_l_per_kg_actual")
+    if vd_act is not None:
+        if vd_act < 0.5:
+            reason_lines.append("A Vd/ABW < 0.5 L/kg borderline/atípusos tartományba esik.")
+            risk_score += 1
+        elif vd_act <= 1.0:
+            reason_lines.append("A Vd/ABW 0.5–1.0 L/kg tartományban van, ez klasszikus értelmezéshez elfogadható.")
+        else:
+            red_flags.append("A Vd/ABW > 1.0 L/kg, ami tágult eloszlási tér/komplex kinetika gyanúját támogatja.")
+            risk_score += 3
+    if dose_number is not None and dose_number < 4:
+        red_flags.append("A klasszikus trapezoid megközelítés inkább legalább a 4. dózis után értelmezhető.")
+        risk_score += 2
+    elif dose_number is not None:
+        reason_lines.append("A dózisszám (>=4) támogatja a klasszikus steady-state értelmezést.")
+    if early_sampling_flag:
+        red_flags.append("A korai mintavétel az eloszlási fázis hatását erősítheti, ezért az 1-kompartmentes közelítés bizonytalanabb lehet.")
+        risk_score += 2
+    if len(clinical_flags) >= 2:
+        red_flags.append("Több klinikai komplexitási flag pozitív (pl. ICU/instabil vese/hematológia/HSCT/ARC/obesitas).")
+        risk_score += 2
+    elif len(clinical_flags) == 1:
+        reason_lines.append(f"Klinikai komplexitási flag: {clinical_flags[0]}.")
+        risk_score += 1
+    if ke_consistency == "inconsistent":
+        red_flags.append("A szakaszos eliminációs meredekségek eltérése miatt az egyetlen log-lineáris szakasz feltételezése gyengébb.")
+        risk_score += 2
+    elif ke_consistency == "borderline":
+        reason_lines.append("A szakaszos meredekségek csak részben konzisztensen támogatják az 1-kompartmentes közelítést.")
+        risk_score += 1
+
+    if risk_score >= 5:
+        confidence = "low"
+    elif risk_score >= 2:
+        confidence = "moderate"
+    else:
+        confidence = "high"
+    complex_kinetics_suspected = confidence == "low" or (vd_act is not None and vd_act > 1.0) or len(clinical_flags) >= 2
+    one_compartment_plausible = confidence != "low"
+
+    return {
+        "one_compartment_plausible": one_compartment_plausible,
+        "confidence": confidence,
+        "complex_kinetics_suspected": complex_kinetics_suspected,
+        "reason_lines": reason_lines,
+        "red_flags": red_flags,
+        "supporting_metrics": {
+            "vd_l_per_kg_actual": vd_act,
+            "vd_l_per_kg_ideal": weights.get("vd_l_per_kg_ideal"),
+            "vd_l_per_kg_adjusted": weights.get("vd_l_per_kg_adjusted"),
+            "dose_number": dose_number,
+            "early_sampling_flag": early_sampling_flag,
+            "clinical_complexity_flags": clinical_flags,
+            "ke_consistency": ke_consistency,
+        },
+    }
+
+
+def _build_trapezoid_assessment(distribution_assessment: dict) -> dict:
+    confidence = distribution_assessment.get("confidence")
+    reasons = list(distribution_assessment.get("reason_lines", []))
+    if confidence == "low":
+        reasons.append("Komplex kinetika gyanúja miatt a klasszikus trapezoid közelítés korlátozott.")
+    return {
+        "recommended": confidence != "low",
+        "confidence": confidence,
+        "reason_lines": reasons,
+    }
+
+
+def _evaluate_pkpd_target(auc24: float, mic: float | None) -> dict:
+    if mic is not None and mic > 0:
+        auc_mic = auc24 / mic
+        primary_met = auc_mic >= 400.0
+        if not primary_met:
+            status = "Alulexpozíció"
+        elif auc24 > TARGET_AUC_HIGH:
+            status = "Túlexpozíció"
+        else:
+            status = "Célzónában"
+        return {
+            "status": status,
+            "target_basis": "auc_mic_primary",
+            "primary_label": "AUC/MIC >= 400",
+            "primary_attained": primary_met,
+            "safety_label": "AUC24 400–600 (túlzott expozíció guardrail)",
+            "safety_high": auc24 > TARGET_AUC_HIGH,
+            "auc_mic": auc_mic,
+        }
+    status = "Célzónában"
+    if auc24 < TARGET_AUC_LOW:
+        status = "Alulexpozíció"
+    elif auc24 > TARGET_AUC_HIGH:
+        status = "Túlexpozíció"
+    return {
+        "status": status,
+        "target_basis": "auc24_fallback",
+        "primary_label": "AUC24 400–600",
+        "primary_attained": TARGET_AUC_LOW <= auc24 <= TARGET_AUC_HIGH,
+        "safety_label": "AUC24 400–600",
+        "safety_high": auc24 > TARGET_AUC_HIGH,
+        "auc_mic": None,
+    }
+
+
+def suggest_regimen(cl_l_h: float, vd_l: float, target_auc: float, crcl: float, rounding_mg: float, mic: float | None = None) -> dict:
     daily_needed = cl_l_h * target_auc
     candidates = []
-    for tau in practical_intervals_by_crcl(crcl):
+    seen = set()
+    intervals = sorted(set(practical_intervals_by_crcl(crcl) + [12, 24]))
+    for tau in intervals:
         raw_dose = daily_needed * (tau / 24.0)
-        rounded_dose = max(rounding_mg, round(raw_dose / rounding_mg) * rounding_mg)
-        tinf = infusion_time_from_dose_hours(rounded_dose)
-        pred = predict_one_compartment(rounded_dose, tau, tinf, cl_l_h, vd_l)
-        score = abs(pred.auc24 - target_auc)
-        if pred.trough < TARGET_TROUGH_LOW:
-            score += (TARGET_TROUGH_LOW - pred.trough) * 8.0
-        elif pred.trough > TARGET_TROUGH_HIGH:
-            score += (pred.trough - TARGET_TROUGH_HIGH) * 8.0
-        candidates.append({
-            "dose": rounded_dose,
-            "tau": tau,
-            "tinf": tinf,
-            "auc24": pred.auc24,
-            "peak": pred.peak,
-            "trough": pred.trough,
-            "score": score,
-        })
+        for factor in (0.8, 1.0, 1.2):
+            rounded_dose = max(rounding_mg, round((raw_dose * factor) / rounding_mg) * rounding_mg)
+            key = (int(rounded_dose), int(tau))
+            if key in seen:
+                continue
+            seen.add(key)
+            tinf = infusion_time_from_dose_hours(rounded_dose)
+            pred = predict_one_compartment(rounded_dose, tau, tinf, cl_l_h, vd_l)
+            assessment = _evaluate_pkpd_target(pred.auc24, mic)
+            auc_mic = assessment["auc_mic"]
+            if mic is not None and mic > 0:
+                target_gap = max(0.0, 400.0 - (auc_mic or 0.0))
+                score = target_gap * 1.2
+            else:
+                auc_delta = abs(pred.auc24 - target_auc)
+                score = auc_delta * 1.0
+            if pred.trough < TARGET_TROUGH_LOW:
+                score += (TARGET_TROUGH_LOW - pred.trough) * 6.0
+            elif pred.trough > TARGET_TROUGH_HIGH:
+                score += (pred.trough - TARGET_TROUGH_HIGH) * 9.0
+            if pred.peak > 40:
+                score += (pred.peak - 40.0) * 1.3
+            if pred.auc24 > TARGET_AUC_HIGH:
+                score += (pred.auc24 - TARGET_AUC_HIGH) * 0.35
+            if mic is not None and mic > 0 and not assessment["primary_attained"] and pred.auc24 > TARGET_AUC_HIGH:
+                score += 120.0
+            if assessment["primary_attained"]:
+                score -= 12.0
+            candidates.append({
+                "dose": rounded_dose,
+                "tau": tau,
+                "tinf": tinf,
+                "auc24": pred.auc24,
+                "peak": pred.peak,
+                "trough": pred.trough,
+                "auc_mic": auc_mic,
+                "target_basis": assessment["target_basis"],
+                "primary_target_met": assessment["primary_attained"],
+                "toxicity_flag": pred.auc24 > TARGET_AUC_HIGH,
+                "efficacy_toxicity_mismatch": bool(mic is not None and mic > 0 and not assessment["primary_attained"] and pred.auc24 > TARGET_AUC_HIGH),
+                "score": score,
+                "text": (
+                    f"{rounded_dose:.0f} mg q{tau:.0f}h — prediktált AUC24: {pred.auc24:.1f}, "
+                    f"trough: {pred.trough:.1f}, peak: {pred.peak:.1f}"
+                    + (f", AUC/MIC: {auc_mic:.1f}" if auc_mic is not None else "")
+                ),
+            })
     candidates.sort(key=lambda item: item["score"])
-    return {"daily_needed": daily_needed, "best": candidates[0], "candidates": candidates}
+    top_candidates = candidates[: max(3, min(6, len(candidates)))]
+    return {"daily_needed": daily_needed, "best": top_candidates[0], "candidates": top_candidates}
+
+
+def _build_toxicity_assessment(auc24: float, mic: float | None, target_assessment: dict) -> dict:
+    auc24_over = auc24 > TARGET_AUC_HIGH
+    mic_present = mic is not None and mic > 0
+    primary_not_met = not bool(target_assessment.get("primary_attained"))
+    mismatch = bool(mic_present and primary_not_met and auc24_over)
+    lines: list[str] = []
+    if auc24_over:
+        lines.append("AUC24 > 600 mg·h/L, ami fokozott toxicitási kockázatra utal.")
+    if mismatch:
+        lines.append("A kívánt AUC/MIC célérték a jelen expozíció mellett sem teljesül megfelelően.")
+        lines.append("További vancomycin expozíciónövelés várhatóan kedvezőtlen lehet.")
+        lines.append("Más antibiotikum vagy alternatív terápiás stratégia mérlegelendő.")
+    return {
+        "toxicity_flag": auc24_over or mismatch,
+        "auc24_overexposure": auc24_over,
+        "efficacy_toxicity_mismatch": mismatch,
+        "message_lines": lines,
+        "consider_alternative_therapy": mismatch,
+    }
 
 
 def calculate(inp: VancomycinInputs) -> dict:
@@ -144,11 +578,9 @@ def calculate(inp: VancomycinInputs) -> dict:
             print("[DEBUG][ENGINE] plot single_model label:", (plot_payload.get("single_model") or {}).get("label"))
             print("[DEBUG][ENGINE] plot len(pred_y):", len((plot_payload.get("single_model") or {}).get("pred_y", []) or []))
             print("[DEBUG][ENGINE] plot len(obs_y):", len((plot_payload.get("single_model") or {}).get("obs_y", []) or []))
-            status = "Célzónában"
-            if auc24 < TARGET_AUC_LOW:
-                status = "Alulexpozíció"
-            elif auc24 > TARGET_AUC_HIGH:
-                status = "Túlexpozíció"
+            target_assessment = _evaluate_pkpd_target(auc24, inp.mic)
+            status = target_assessment["status"]
+            toxicity_assessment = _build_toxicity_assessment(auc24, inp.mic, target_assessment)
             print(
                 "[DEBUG][ENGINE] R mapped result keys:",
                 sorted(["cl_l_h", "vd_l", "auc24", "auc_mic", "peak", "trough", "crcl"]),
@@ -165,6 +597,14 @@ def calculate(inp: VancomycinInputs) -> dict:
                     "fallback_used": False,
                 },
             )
+            weight_metrics = _build_weight_metrics_payload(inp, vd_l)
+            distribution_assessment = _build_distribution_assessment(inp, vd_l, crcl)
+            trapezoid_assessment = _build_trapezoid_assessment(distribution_assessment)
+            suggestion = suggest_regimen(cl_l_h, vd_l, inp.target_auc, crcl, inp.rounding_mg, inp.mic)
+            if target_assessment["target_basis"] == "auc_mic_primary":
+                trapezoid_assessment["reason_lines"].append("MIC rendelkezésre áll: elsődleges cél az AUC/MIC >= 400; az AUC24 főként túlzott expozíció guardrail.")
+            else:
+                trapezoid_assessment["reason_lines"].append("MIC hiányában az értékelés elsődlegesen AUC24 400–600 célablak alapján történik.")
             return {
                 "status": status,
                 "crcl": crcl,
@@ -176,8 +616,14 @@ def calculate(inp: VancomycinInputs) -> dict:
                 "half_life": 0.0,
                 "ke": 0.0,
                 "auc_mic": auc_mic,
+                "target_assessment": target_assessment,
+                "toxicity_assessment": toxicity_assessment,
                 "auc_mic_status": "AUC/MIC számolva." if auc_mic is not None else "AUC/MIC nem értékelhető, mert MIC nincs megadva.",
-                "suggestion": {"best": {"dose": inp.dose_mg, "tau": inp.tau_h}},
+                "suggestion": suggestion,
+                "regimen_options": suggestion.get("candidates", []),
+                "weight_metrics": weight_metrics,
+                "distribution_assessment": distribution_assessment,
+                "trapezoid_assessment": trapezoid_assessment,
                 "selected_model_key": str(r_out.get("model_key") or "goti_2018"),
                 "auto_selection": {
                     "recommended_model_key": str(r_out.get("model_key") or "goti_2018"),
@@ -270,6 +716,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         pred_half_life = base["half_life"]
         selected_model_key = "trapezoid_classic"
         final_explanation = "Klasszikus trapezoid (steady-state) számítás kényszerítve; a végső PK értékek ezt a modellt követik."
+        plot_payload = build_classical_curve(inp, base)
     else:
         cl_used = best.cl_l_h
         vd_used = best.vd_l
@@ -280,6 +727,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         pred_half_life = math.log(2) / pred_ke
         selected_model_key = workflow["final"].selected_model_key
         final_explanation = workflow["final"].explanation
+        plot_payload = workflow.get("plot")
     crcl = workflow["crcl"]
     auto_selection = {
         "recommended_model_key": auto.recommended_model_key,
@@ -304,15 +752,20 @@ def calculate(inp: VancomycinInputs) -> dict:
     history_summary_by_antibiotic = workflow.get("history_summary_by_antibiotic", {})
     missing_covariates = workflow.get("missing_covariates", {})
 
-    status = "Célzónában"
-    if pred_auc24 < TARGET_AUC_LOW:
-        status = "Alulexpozíció"
-    elif pred_auc24 > TARGET_AUC_HIGH:
-        status = "Túlexpozíció"
+    target_assessment = _evaluate_pkpd_target(pred_auc24, inp.mic)
+    status = target_assessment["status"]
+    toxicity_assessment = _build_toxicity_assessment(pred_auc24, inp.mic, target_assessment)
 
     auc_mic = None if inp.mic is None else pred_auc24 / inp.mic
     auc_mic_status = "AUC/MIC nem értékelhető, mert MIC nincs megadva." if inp.mic is None else "AUC/MIC számolva."
-    suggestion = suggest_regimen(cl_used, vd_used, inp.target_auc, crcl, inp.rounding_mg)
+    suggestion = suggest_regimen(cl_used, vd_used, inp.target_auc, crcl, inp.rounding_mg, inp.mic)
+    weight_metrics = _build_weight_metrics_payload(inp, vd_used)
+    distribution_assessment = _build_distribution_assessment(inp, vd_used, crcl)
+    trapezoid_assessment = _build_trapezoid_assessment(distribution_assessment)
+    if target_assessment["target_basis"] == "auc_mic_primary":
+        trapezoid_assessment["reason_lines"].append("MIC rendelkezésre áll: elsődleges cél az AUC/MIC >= 400; az AUC24 főként túlzott expozíció guardrail.")
+    else:
+        trapezoid_assessment["reason_lines"].append("MIC hiányában az értékelés elsődlegesen AUC24 400–600 célablak alapján történik.")
 
     vd_prior = inp.weight_kg * (0.7 if inp.method == "Bayesian" else 0.9)
     ke_obs = math.log(inp.c1 / inp.c2) / (inp.t2_start_h - inp.t1_start_h)
@@ -331,15 +784,21 @@ def calculate(inp: VancomycinInputs) -> dict:
         "half_life": pred_half_life,
         "ke": pred_ke,
         "auc_mic": auc_mic,
+        "target_assessment": target_assessment,
+        "toxicity_assessment": toxicity_assessment,
         "auc_mic_status": auc_mic_status,
         "suggestion": suggestion,
+        "regimen_options": suggestion.get("candidates", []),
+        "weight_metrics": weight_metrics,
+        "distribution_assessment": distribution_assessment,
+        "trapezoid_assessment": trapezoid_assessment,
         "selected_model_key": selected_model_key,
         "auto_selection": auto_selection,
         "fit_summary": fit_summary,
         "final_explanation": final_explanation,
         "history_summary_by_antibiotic": history_summary_by_antibiotic,
         "missing_covariates": missing_covariates,
-        "plot": workflow.get("plot"),
+        "plot": plot_payload,
         "classical_reference": base,
         "event_summary": workflow.get("event_summary", {}),
         "fit_debug": workflow.get("fit_debug", {}),

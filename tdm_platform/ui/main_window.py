@@ -1985,26 +1985,69 @@ class MainWindow(legacy_ui.TDMMainWindow):
     def _align_curve_with_timeline(self, pred_x: list[float], pred_y: list[float], dose_events: list[dict], obs_x: list[float]) -> tuple[list[float], list[float]]:
         if not pred_x or not pred_y or len(pred_x) != len(pred_y):
             return pred_x, pred_y
-        x = [max(0.0, float(v)) for v in pred_x]
-        y = [max(0.0, float(v)) for v in pred_y]
-        x_end = max(x)
+        base_xy = sorted([(float(px), max(0.0, float(py))) for px, py in zip(pred_x, pred_y)], key=lambda p: p[0])
+        x_base = [p[0] for p in base_xy]
+        y_base = [p[1] for p in base_xy]
         dose_times = [self._safe_optional_float(ev.get("time")) for ev in dose_events]
-        dose_times = [float(t) for t in dose_times if t is not None and float(t) >= 0.0]
+        dose_times = [float(t) for t in dose_times if t is not None]
         obs_times = [self._safe_optional_float(t) for t in obs_x]
-        obs_times = [float(t) for t in obs_times if t is not None and float(t) >= 0.0]
+        obs_times = [float(t) for t in obs_times if t is not None]
         tau_h = self._safe_optional_float((self._last_pk_payload or {}).get("tau")) or 12.0
-        target_end = max([x_end] + dose_times + obs_times) + max(0.25 * tau_h, 2.0)
-        if target_end <= x_end + 1e-6:
-            return x, y
-        if len(x) >= 2 and y[-1] > 0 and y[-2] > 0:
-            dt = max(1e-6, x[-1] - x[-2])
-            ke_tail = max(1e-6, math.log(y[-2] / y[-1]) / dt)
+        target_start = min([x_base[0]] + dose_times + obs_times)
+        target_end = max([x_base[-1]] + dose_times + obs_times) + max(0.25 * tau_h, 2.0)
+        step = max(0.25, tau_h / 24.0)
+        if len(x_base) >= 2 and y_base[-1] > 0 and y_base[-2] > 0:
+            dt_tail = max(1e-6, x_base[-1] - x_base[-2])
+            ke_tail = max(1e-6, math.log(y_base[-2] / y_base[-1]) / dt_tail)
         else:
             ke_tail = 0.12
-        step = max(0.25, tau_h / 24.0)
-        cur = x_end + step
+        if len(x_base) >= 2 and y_base[0] > 0 and y_base[1] > 0:
+            dt_head = max(1e-6, x_base[1] - x_base[0])
+            ke_head = max(1e-6, math.log(y_base[0] / y_base[1]) / dt_head)
+        else:
+            ke_head = ke_tail
+
+        def _interp_base(t: float) -> float:
+            if t <= x_base[0]:
+                return y_base[0] * math.exp(ke_head * (x_base[0] - t))
+            if t >= x_base[-1]:
+                return y_base[-1] * math.exp(-ke_tail * (t - x_base[-1]))
+            for i in range(1, len(x_base)):
+                if t <= x_base[i]:
+                    x0, x1 = x_base[i - 1], x_base[i]
+                    y0, y1 = y_base[i - 1], y_base[i]
+                    ratio = (t - x0) / max(1e-9, (x1 - x0))
+                    return y0 + (y1 - y0) * ratio
+            return y_base[-1]
+
+        cl_l_h = self._safe_optional_float((self.results or {}).get("pk", {}).get("cl_l_h")) or 0.0
+        vd_l = self._safe_optional_float((self.results or {}).get("pk", {}).get("vd_l")) or 0.0
+        k = (cl_l_h / vd_l) if (cl_l_h > 0 and vd_l > 0) else ke_tail
+
+        def _predose_contrib(t: float) -> float:
+            total = 0.0
+            for ev in dose_events:
+                t0 = self._safe_optional_float(ev.get("time"))
+                if t0 is None or t0 >= x_base[0]:
+                    continue
+                dose_val = self._safe_optional_float(ev.get("dose") or ev.get("dose_mg")) or 0.0
+                tinf = self._safe_optional_float(ev.get("tinf") or ev.get("tinf_h")) or 1.0
+                if dose_val <= 0:
+                    continue
+                r0 = dose_val / max(tinf, 1e-6)
+                if t < t0:
+                    continue
+                if t <= t0 + tinf:
+                    total += (r0 / max(cl_l_h, 1e-6)) * (1.0 - math.exp(-k * (t - t0)))
+                else:
+                    total += (r0 / max(cl_l_h, 1e-6)) * (1.0 - math.exp(-k * tinf)) * math.exp(-k * (t - t0 - tinf))
+            return total
+
+        x: list[float] = []
+        y: list[float] = []
+        cur = target_start
         while cur <= target_end + 1e-6:
-            y_val = y[-1] * math.exp(-ke_tail * (cur - x[-1]))
+            y_val = _interp_base(cur) + _predose_contrib(cur)
             x.append(cur)
             y.append(max(0.0, y_val))
             cur += step

@@ -572,3 +572,8 @@ def test_classical_path_plot_payload_keeps_legacy_keys():
     plot = result["plot"]
     for key in ["title", "single_model", "model_averaging", "current_x", "current_y", "best_x", "best_y", "obs_x", "obs_y", "metadata", "warnings", "errors"]:
         assert key in plot
+    single = plot["single_model"]
+    assert len(single.get("pred_x", [])) >= 80
+    assert len(single.get("pred_y", [])) >= 80
+    assert len(single.get("pred_x", [])) > len(single.get("obs_x", []))
+    assert plot.get("metadata", {}).get("mode") == "trapezoid_classic"

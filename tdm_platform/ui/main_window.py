@@ -2306,53 +2306,6 @@ class MainWindow(legacy_ui.TDMMainWindow):
             "obs_x": [pk["t1"], pk["t2"]],
             "obs_y": [pk["c1"], pk["c2"]],
         }
-        if result.get("selected_model_key") == "trapezoid_classic":
-            obs_x = [float(pk["t1"]), float(pk["t2"])]
-            obs_y = [float(pk["c1"]), float(pk["c2"])]
-            dose_events = []
-            for event in pk.get("episode_events", []) or []:
-                kind = str(event.get("event_type", "")).lower()
-                if "dose" not in kind:
-                    continue
-                t_h = self._safe_optional_float(event.get("time_h"))
-                if t_h is None:
-                    continue
-                dose_events.append({"event_type": kind, "time": t_h, "dose": self._safe_optional_float(event.get("dose_mg")) or 0.0})
-            plot = {
-                "title": "Vancomycin klasszikus trapezoid",
-                "single_model": {
-                    "label": "Klasszikus trapezoid (steady-state)",
-                    "obs_x": obs_x,
-                    "obs_y": obs_y,
-                    "pred_x": obs_x,
-                    "pred_y": obs_y,
-                    "dose_events": dose_events,
-                    "fit": {"rmse": 0.0, "mae": 0.0},
-                },
-                "model_averaging": {
-                    "overlays": [
-                        {
-                            "label": "Klasszikus trapezoid",
-                            "weight": 1.0,
-                            "rmse": 0.0,
-                            "mae": 0.0,
-                            "x": obs_x,
-                            "y": obs_y,
-                            "auc24": round(float(result.get("auc24", 0.0)), 2),
-                            "auc_mic": result.get("auc_mic"),
-                        }
-                    ]
-                },
-                "current_x": obs_x,
-                "current_y": obs_y,
-                "best_x": obs_x,
-                "best_y": obs_y,
-                "obs_x": obs_x,
-                "obs_y": obs_y,
-                "metadata": {"mode": "trapezoid_classic"},
-                "warnings": result.get("warnings", []),
-                "errors": result.get("errors", []),
-            }
         plot.setdefault("metadata", {})
         if isinstance(plot["metadata"], dict):
             active_plot_mode = "model_averaging" if hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1 else "single_model"

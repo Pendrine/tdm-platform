@@ -74,25 +74,12 @@ def calc_auc_trapezoid(inp: VancomycinInputs) -> dict[str, float]:
 
 def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
     tau_h = max(float(inp.tau_h), 1e-6)
-    tinf_h = max(min(float(inp.tinf_h), tau_h), 1e-6)
+    default_tinf_h = max(min(float(inp.tinf_h), tau_h), 1e-6)
     ke = max(float(base.get("ke") or 0.0), 1e-6)
-    true_peak = float(base.get("true_peak") or 0.0)
+    cl_l_h = max(float(base.get("cl_l_h") or 0.0), 1e-6)
     true_trough = max(float(base.get("true_trough") or 0.0), 0.0)
-    start_c = 0.0 if int(inp.dose_number or 0) <= 1 else true_trough
 
     n_points = 100
-    pred_x = [tau_h * i / (n_points - 1) for i in range(n_points)]
-    pred_y: list[float] = []
-    raw_tau = math.exp(-ke * max(tau_h - tinf_h, 1e-6))
-    for t in pred_x:
-        if t <= tinf_h:
-            c = start_c + (true_peak - start_c) * (t / tinf_h)
-        else:
-            raw = math.exp(-ke * (t - tinf_h))
-            denom = max(1e-6, 1.0 - raw_tau)
-            c = true_trough + (true_peak - true_trough) * ((raw - raw_tau) / denom)
-        pred_y.append(max(0.0, float(c)))
-
     dose_events: list[dict] = []
     for event in inp.episode_events or []:
         kind = str(event.get("event_type", "")).lower()
@@ -103,26 +90,78 @@ def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
         except (TypeError, ValueError):
             continue
         if 0.0 <= t_h <= tau_h:
-            dose_events.append(
-                {
-                    "time": t_h,
-                    "event_type": kind or "maintenance_dose",
-                    "dose": event.get("dose_mg", inp.dose_mg),
-                    "tinf": event.get("tinf_h", inp.tinf_h),
-                    "tau": inp.tau_h,
-                    "event_datetime": event.get("event_datetime"),
-                }
-            )
+            if t_h <= tau_h:
+                dose_events.append(
+                    {
+                        "time": t_h,
+                        "event_type": kind or "maintenance_dose",
+                        "dose": event.get("dose_mg", inp.dose_mg),
+                        "tinf": event.get("tinf_h", inp.tinf_h),
+                        "tau": inp.tau_h,
+                        "event_datetime": event.get("event_datetime"),
+                    }
+                )
     if not dose_events:
         dose_events.append(
             {
                 "time": 0.0,
                 "event_type": "maintenance_dose",
                 "dose": inp.dose_mg,
-                "tinf": inp.tinf_h,
+                "tinf": default_tinf_h,
                 "tau": inp.tau_h,
             }
         )
+    dose_events = sorted(dose_events, key=lambda ev: float(ev.get("time", 0.0)))
+    curve_start = min([0.0] + [float(ev.get("time", 0.0)) for ev in dose_events])
+    pred_x = [curve_start + (tau_h - curve_start) * i / (n_points - 1) for i in range(n_points)]
+
+    def _dose_contrib(t: float, dose: float, tinf: float, t0: float) -> float:
+        if t <= t0:
+            return 0.0
+        r0 = dose / max(tinf, 1e-6)
+        if t <= t0 + tinf:
+            return (r0 / cl_l_h) * (1.0 - math.exp(-ke * (t - t0)))
+        return (r0 / cl_l_h) * (1.0 - math.exp(-ke * tinf)) * math.exp(-ke * (t - t0 - tinf))
+
+    raw_y: list[float] = []
+    for t in pred_x:
+        c = 0.0
+        for ev in dose_events:
+            d = max(float(ev.get("dose") or 0.0), 0.0)
+            tinf = max(min(float(ev.get("tinf") or default_tinf_h), tau_h), 1e-6)
+            t0 = float(ev.get("time", 0.0))
+            c += _dose_contrib(t, d, tinf, t0)
+        raw_y.append(max(0.0, c))
+
+    t1 = float(inp.t1_start_h)
+    t2 = float(inp.t2_start_h)
+    c1 = max(float(inp.c1), 1e-9)
+    c2 = max(float(inp.c2), 1e-9)
+
+    def _interp(arr_x: list[float], arr_y: list[float], t: float) -> float:
+        if t <= arr_x[0]:
+            return arr_y[0]
+        if t >= arr_x[-1]:
+            return arr_y[-1]
+        for i in range(1, len(arr_x)):
+            if t <= arr_x[i]:
+                x0, x1 = arr_x[i - 1], arr_x[i]
+                y0, y1 = arr_y[i - 1], arr_y[i]
+                ratio = (t - x0) / max(1e-9, (x1 - x0))
+                return y0 + (y1 - y0) * ratio
+        return arr_y[-1]
+
+    r1 = max(_interp(pred_x, raw_y, t1), 1e-9)
+    r2 = max(_interp(pred_x, raw_y, t2), 1e-9)
+    ln_corr1 = math.log(c1 / r1)
+    ln_corr2 = math.log(c2 / r2)
+    b_corr = (ln_corr1 - ln_corr2) / max(1e-9, (t1 - t2))
+    a_corr = ln_corr1 + b_corr * t1
+    pred_y: list[float] = []
+    for raw, t in zip(raw_y, pred_x):
+        exp_term = a_corr - b_corr * t
+        exp_term = max(-50.0, min(50.0, exp_term))
+        pred_y.append(max(0.0, raw * math.exp(exp_term)))
 
     obs_x = [float(inp.t1_start_h), float(inp.t2_start_h)]
     obs_y = [float(inp.c1), float(inp.c2)]
@@ -146,7 +185,7 @@ def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
         "obs_x": obs_x,
         "obs_y": obs_y,
         "dose_events": dose_events,
-        "metadata": {"mode": "trapezoid_classic", "start_concentration": start_c},
+        "metadata": {"mode": "trapezoid_classic", "start_concentration": true_trough if int(inp.dose_number or 0) > 1 else 0.0},
         "warnings": [],
         "errors": [],
     }

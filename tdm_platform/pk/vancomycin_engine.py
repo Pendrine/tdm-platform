@@ -72,6 +72,86 @@ def calc_auc_trapezoid(inp: VancomycinInputs) -> dict[str, float]:
     }
 
 
+def build_classical_curve(inp: VancomycinInputs, base: dict) -> dict:
+    tau_h = max(float(inp.tau_h), 1e-6)
+    tinf_h = max(min(float(inp.tinf_h), tau_h), 1e-6)
+    ke = max(float(base.get("ke") or 0.0), 1e-6)
+    true_peak = float(base.get("true_peak") or 0.0)
+    true_trough = max(float(base.get("true_trough") or 0.0), 0.0)
+    start_c = 0.0 if int(inp.dose_number or 0) <= 1 else true_trough
+
+    n_points = 100
+    pred_x = [tau_h * i / (n_points - 1) for i in range(n_points)]
+    pred_y: list[float] = []
+    raw_tau = math.exp(-ke * max(tau_h - tinf_h, 1e-6))
+    for t in pred_x:
+        if t <= tinf_h:
+            c = start_c + (true_peak - start_c) * (t / tinf_h)
+        else:
+            raw = math.exp(-ke * (t - tinf_h))
+            denom = max(1e-6, 1.0 - raw_tau)
+            c = true_trough + (true_peak - true_trough) * ((raw - raw_tau) / denom)
+        pred_y.append(max(0.0, float(c)))
+
+    dose_events: list[dict] = []
+    for event in inp.episode_events or []:
+        kind = str(event.get("event_type", "")).lower()
+        if "dose" not in kind:
+            continue
+        try:
+            t_h = float(event.get("time_h", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= t_h <= tau_h:
+            dose_events.append(
+                {
+                    "time": t_h,
+                    "event_type": kind or "maintenance_dose",
+                    "dose": event.get("dose_mg", inp.dose_mg),
+                    "tinf": event.get("tinf_h", inp.tinf_h),
+                    "tau": inp.tau_h,
+                    "event_datetime": event.get("event_datetime"),
+                }
+            )
+    if not dose_events:
+        dose_events.append(
+            {
+                "time": 0.0,
+                "event_type": "maintenance_dose",
+                "dose": inp.dose_mg,
+                "tinf": inp.tinf_h,
+                "tau": inp.tau_h,
+            }
+        )
+
+    obs_x = [float(inp.t1_start_h), float(inp.t2_start_h)]
+    obs_y = [float(inp.c1), float(inp.c2)]
+    curve_label = "Klasszikus trapezoid (first dose)" if int(inp.dose_number or 0) <= 1 else "Klasszikus trapezoid (steady-state)"
+    return {
+        "title": "Vancomycin klasszikus koncentráció-idő profil",
+        "single_model": {
+            "label": curve_label,
+            "pred_x": pred_x,
+            "pred_y": pred_y,
+            "obs_x": obs_x,
+            "obs_y": obs_y,
+            "dose_events": dose_events,
+            "fit": {"engine": "classical_piecewise"},
+        },
+        "model_averaging": {"overlays": []},
+        "current_x": pred_x,
+        "current_y": pred_y,
+        "best_x": pred_x,
+        "best_y": pred_y,
+        "obs_x": obs_x,
+        "obs_y": obs_y,
+        "dose_events": dose_events,
+        "metadata": {"mode": "trapezoid_classic", "start_concentration": start_c},
+        "warnings": [],
+        "errors": [],
+    }
+
+
 def infusion_time_from_dose_hours(dose_mg: float) -> float:
     if dose_mg <= 1000:
         return 1.0
@@ -527,6 +607,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         pred_half_life = base["half_life"]
         selected_model_key = "trapezoid_classic"
         final_explanation = "Klasszikus trapezoid (steady-state) számítás kényszerítve; a végső PK értékek ezt a modellt követik."
+        plot_payload = build_classical_curve(inp, base)
     else:
         cl_used = best.cl_l_h
         vd_used = best.vd_l
@@ -537,6 +618,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         pred_half_life = math.log(2) / pred_ke
         selected_model_key = workflow["final"].selected_model_key
         final_explanation = workflow["final"].explanation
+        plot_payload = workflow.get("plot")
     crcl = workflow["crcl"]
     auto_selection = {
         "recommended_model_key": auto.recommended_model_key,
@@ -607,7 +689,7 @@ def calculate(inp: VancomycinInputs) -> dict:
         "final_explanation": final_explanation,
         "history_summary_by_antibiotic": history_summary_by_antibiotic,
         "missing_covariates": missing_covariates,
-        "plot": workflow.get("plot"),
+        "plot": plot_payload,
         "classical_reference": base,
         "event_summary": workflow.get("event_summary", {}),
         "fit_debug": workflow.get("fit_debug", {}),

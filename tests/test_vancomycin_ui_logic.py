@@ -171,3 +171,100 @@ def test_get_active_sample_times_and_levels_falls_back_to_relative_fields():
     t1, c1, t2, c2, source = MainWindow._get_active_sample_times_and_levels(dummy)
     assert source == "relative"
     assert (t1, c1, t2, c2) == ("2.0", "23.5", "11.0", "8.0")
+
+
+def test_get_active_sample_times_and_levels_ignores_hidden_clinical_values():
+    dummy = SimpleNamespace(
+        t1_edit=_DummyLineEdit("2.0"),
+        t2_edit=_DummyLineEdit("11.0"),
+        level1_rel_edit=_DummyLineEdit("23.5"),
+        level2_rel_edit=_DummyLineEdit("8.0"),
+        level1_clin_edit=_DummyLineEdit("30.0", visible=False),
+        level2_clin_edit=_DummyLineEdit("10.0", visible=False),
+    )
+    t1, c1, t2, c2, source = MainWindow._get_active_sample_times_and_levels(dummy)
+    assert source == "relative"
+    assert (t1, c1, t2, c2) == ("2.0", "23.5", "11.0", "8.0")
+
+
+def test_show_history_detail_appends_user_timestamp_method_patient_audit_block():
+    class _DummyHistoryDetail:
+        def __init__(self):
+            self.html = ""
+
+        def append(self, txt):
+            self.html += txt
+
+    rendered_rows = []
+    history_row = {
+        "user": "nurse@example.com",
+        "timestamp": "2026-03-31T10:00:00",
+        "method": "Bayesian",
+        "patient_id": "P-001",
+    }
+    dummy = SimpleNamespace(
+        history_table=SimpleNamespace(property=lambda _k: [history_row], currentRow=lambda: 0),
+        history_detail=_DummyHistoryDetail(),
+        _history_tab=SimpleNamespace(render_detail=lambda *_args, **_kwargs: rendered_rows.append(history_row)),
+        _username_for_email=lambda _email: "nurse.user",
+    )
+    MainWindow.show_history_detail(dummy)
+    assert rendered_rows
+    assert "Felhasználó:" in dummy.history_detail.html
+    assert "Timestamp:" in dummy.history_detail.html
+    assert "Method:" in dummy.history_detail.html
+    assert "Patient ID:" in dummy.history_detail.html
+
+
+def test_collect_history_sample_points_uses_event_datetime_window_and_reference_projection():
+    ref_dt = main_window_module.datetime(2026, 4, 1, 8, 0, 0)
+    dummy = SimpleNamespace(
+        _last_pk_payload={
+            "patient_id": "P-001",
+            "episode_events": [
+                {"event_datetime": "2026-04-01T10:00:00"},
+                {"event_datetime": "2026-04-01T12:00:00"},
+            ],
+        },
+        relative_reference_dt=SimpleNamespace(dateTime=lambda: SimpleNamespace(toPython=lambda: ref_dt)),
+        history_data=[
+            {
+                "drug": "vancomycin",
+                "patient_id": "P-001",
+                "timestamp": "2026-04-01T00:00:00",
+                "method": "Bayesian",
+                "inputs": {
+                    "episode_events": [
+                        {"event_type": "sample", "level_mg_l": "20", "event_datetime": "2026-04-01T11:00:00"},
+                        {"event_type": "sample", "level_mg_l": "19", "event_datetime": "2026-04-05T11:00:00"},
+                    ]
+                },
+            }
+        ],
+        _safe_optional_float=MainWindow._safe_optional_float,
+        _parse_event_datetime=MainWindow._parse_event_datetime,
+    )
+    points = MainWindow._collect_history_sample_points(dummy)
+    assert len(points) == 1
+    # 11:00 relative to 08:00 -> 3h (datetime-first projection instead of stale time_h)
+    assert abs(points[0]["time_h"] - 3.0) < 1e-6
+
+
+def test_expand_dose_events_for_plot_generates_intermediate_cycles_beyond_latest_sample():
+    ref_dt = main_window_module.datetime(2026, 4, 1, 0, 0, 0)
+    dummy = SimpleNamespace(
+        _last_pk_payload={
+            "dose": 1000,
+            "tau": 8,
+            "tinf": 1,
+            "episode_events": [{"event_type": "maintenance_dose", "event_datetime": "2026-04-01T00:00:00"}],
+        },
+        relative_reference_dt=SimpleNamespace(dateTime=lambda: SimpleNamespace(toPython=lambda: ref_dt)),
+        _safe_optional_float=MainWindow._safe_optional_float,
+        _parse_event_datetime=MainWindow._parse_event_datetime,
+    )
+    expanded = MainWindow._expand_dose_events_for_plot(dummy, [], [2.0, 10.0], [0.0, 24.0])
+    times = sorted([round(e["time"], 2) for e in expanded if e.get("event_type") == "maintenance_dose"])
+    # at least 0,8,16,24 and one extra interval-end point at 32h due +tau extension
+    assert times[:4] == [0.0, 8.0, 16.0, 24.0]
+    assert 32.0 in times

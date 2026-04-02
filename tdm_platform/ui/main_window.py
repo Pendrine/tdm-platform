@@ -1899,38 +1899,88 @@ class MainWindow(legacy_ui.TDMMainWindow):
         )
         return expanded
 
+    def _build_one_compartment_regimen_curve(
+        self,
+        dose_mg: float,
+        tau_h: float,
+        tinf_h: float,
+        cl_l_h: float,
+        vd_l: float,
+        n_points: int = 120,
+    ) -> tuple[list[float], list[float], float, float]:
+        tau_h = max(float(tau_h), 1e-6)
+        tinf_h = max(min(float(tinf_h), tau_h), 1e-6)
+        cl_l_h = max(float(cl_l_h), 1e-6)
+        vd_l = max(float(vd_l), 1e-6)
+        k = cl_l_h / vd_l
+        r0 = float(dose_mg) / tinf_h
+        exp_tau = math.exp(-k * tau_h)
+        exp_tinf = math.exp(-k * tinf_h)
+        trough_ss = (r0 / cl_l_h) * ((1.0 - exp_tinf) * exp_tau) / max(1e-9, (1.0 - exp_tau))
+        peak_ss = trough_ss * math.exp(-k * tinf_h) + (r0 / cl_l_h) * (1.0 - exp_tinf)
+        x = [tau_h * i / (max(int(n_points), 2) - 1) for i in range(max(int(n_points), 2))]
+        y: list[float] = []
+        for t in x:
+            if t <= tinf_h:
+                c = trough_ss * math.exp(-k * t) + (r0 / cl_l_h) * (1.0 - math.exp(-k * t))
+            else:
+                c = peak_ss * math.exp(-k * (t - tinf_h))
+            y.append(max(0.0, c))
+        return x, y, float(peak_ss), float(trough_ss)
+
     def _build_regimen_overlay_traces(self, fig: go.Figure, view_mode: str) -> None:
         if not self.results or not self.results.get("pk"):
             return
         pk = self.results["pk"]
         show_conc = bool(hasattr(self, "toggle_regimen_conc") and self.toggle_regimen_conc.isChecked())
         show_auc = bool(hasattr(self, "toggle_regimen_auc") and self.toggle_regimen_auc.isChecked())
+        cl_l_h = float(pk.get("cl_l_h") or 0.0)
+        vd_l = float(pk.get("vd_l") or 0.0)
+        if cl_l_h <= 0.0 or vd_l <= 0.0:
+            return
         options = (pk.get("regimen_options") or [])[:3]
         for idx, opt in enumerate(options):
+            dose = float(opt.get("dose") or 0.0)
             tau = float(opt.get("tau") or 12.0)
-            peak = float(opt.get("peak") or 0.0)
-            trough = float(opt.get("trough") or 0.0)
             tinf = float(opt.get("tinf") or 1.0)
-            n = 60
-            x = [tau * i / (n - 1) for i in range(n)]
-            y: list[float] = []
-            ke = max(1e-6, math.log(max(peak, 1e-6) / max(trough, 1e-6)) / max(tau - tinf, 1e-6))
-            raw_tau = math.exp(-ke * max(tau - tinf, 1e-6))
-            for t in x:
-                if t <= tinf:
-                    c = trough + (peak - trough) * (t / max(tinf, 1e-6))
-                else:
-                    raw = math.exp(-ke * (t - tinf))
-                    c = trough + (peak - trough) * ((raw - raw_tau) / max(1e-6, (1.0 - raw_tau)))
-                y.append(max(0.0, c))
+            x, y, peak_ss, trough_ss = self._build_one_compartment_regimen_curve(
+                dose_mg=dose,
+                tau_h=tau,
+                tinf_h=tinf,
+                cl_l_h=cl_l_h,
+                vd_l=vd_l,
+                n_points=120,
+            )
+            hover_text = [f"dose={dose:.0f} mg | tau={tau:.0f} h | peak_ss={peak_ss:.1f} | trough_ss={trough_ss:.1f}"] * len(x)
             if view_mode == "auc":
                 if not show_auc:
                     continue
-                fig.add_trace(go.Scatter(x=x, y=y, fill="tozeroy", mode="lines", opacity=0.15 if idx else 0.3, name=f"Regimen AUC {idx+1}"))
+                fig.add_trace(
+                    go.Scatter(
+                        x=x,
+                        y=y,
+                        fill="tozeroy",
+                        mode="lines",
+                        opacity=0.15 if idx else 0.30,
+                        name=f"Regimen AUC {idx+1}",
+                        text=hover_text,
+                        hovertemplate="%{text}<br>t=%{x:.2f} h | C=%{y:.2f}<extra></extra>",
+                    )
+                )
             else:
                 if not show_conc:
                     continue
-                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", opacity=0.35 if idx else 0.8, name=f"Regimen {idx+1}: {opt.get('dose',0):.0f} mg q{tau:.0f}h"))
+                fig.add_trace(
+                    go.Scatter(
+                        x=x,
+                        y=y,
+                        mode="lines",
+                        opacity=0.45 if idx else 0.85,
+                        name=f"Regimen {idx+1}: {dose:.0f} mg q{tau:.0f}h",
+                        text=hover_text,
+                        hovertemplate="%{text}<br>t=%{x:.2f} h | C=%{y:.2f}<extra></extra>",
+                    )
+                )
 
     def _align_curve_with_timeline(self, pred_x: list[float], pred_y: list[float], dose_events: list[dict], obs_x: list[float]) -> tuple[list[float], list[float]]:
         if not pred_x or not pred_y or len(pred_x) != len(pred_y):

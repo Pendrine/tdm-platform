@@ -75,6 +75,10 @@ def test_trapezoid_auc_and_auc_mic_and_suggestion():
     assert auc["auc24"] > 0
     assert result["auc_mic"] == result["auc24"]
     assert result["suggestion"]["best"]["dose"] > 0
+    assert len(result.get("regimen_options", [])) >= 3
+    assert {"auc24", "peak", "trough"}.issubset(result["regimen_options"][0].keys())
+    assert result.get("distribution_assessment")
+    assert result.get("weight_metrics")
 
 
 def test_selector_icu_obese_hsct_and_bayes_preference():
@@ -157,6 +161,176 @@ def test_engine_bayesian_path_contains_auto_select_and_fit_summary():
     assert result["auto_selection"]["recommended_model_key"]
     assert result["selected_model_key"]
     assert len(result["fit_summary"]) >= 2
+    assert result.get("distribution_assessment")
+    assert result.get("trapezoid_assessment")
+    assert result.get("weight_metrics")
+    assert len(result.get("regimen_options", [])) >= 3
+
+
+def test_distribution_thresholds_borderline_acceptable_redflag():
+    base_kwargs = dict(
+        sex="férfi",
+        age=60,
+        scr_umol=100,
+        dose_mg=1000,
+        tau_h=12,
+        tinf_h=1,
+        c1=25,
+        t1_start_h=2,
+        c2=12,
+        t2_start_h=10,
+        method="Klasszikus",
+        dose_number=5,
+        height_cm=170,
+    )
+    low = calculate(VancomycinInputs(weight_kg=250, **base_kwargs))
+    ok = calculate(VancomycinInputs(weight_kg=80, **base_kwargs))
+    high = calculate(VancomycinInputs(weight_kg=45, **base_kwargs))
+    assert low["distribution_assessment"]["supporting_metrics"]["vd_l_per_kg_actual"] < 0.5
+    assert any("borderline" in line.lower() or "atípusos" in line.lower() for line in low["distribution_assessment"]["reason_lines"])
+    assert 0.5 <= ok["distribution_assessment"]["supporting_metrics"]["vd_l_per_kg_actual"] <= 1.0
+    assert high["distribution_assessment"]["supporting_metrics"]["vd_l_per_kg_actual"] > 1.0
+    assert high["distribution_assessment"]["complex_kinetics_suspected"]
+
+
+def test_three_sample_ke_consistency_is_filled():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=24,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+            dose_number=5,
+            episode_events=[
+                {"event_type": "sample", "time_h": 2, "level_mg_l": 24},
+                {"event_type": "sample", "time_h": 6, "level_mg_l": 16},
+                {"event_type": "sample", "time_h": 10, "level_mg_l": 12},
+            ],
+        )
+    )
+    assert result["distribution_assessment"]["supporting_metrics"]["ke_consistency"] in {"consistent", "borderline", "inconsistent"}
+
+
+def test_low_confidence_when_low_dose_number():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+            dose_number=1,
+        )
+    )
+    assert result["distribution_assessment"]["confidence"] == "low"
+
+
+def test_target_assessment_uses_auc_mic_when_mic_present():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Klasszikus",
+            mic=2.0,
+        )
+    )
+    assert result["target_assessment"]["target_basis"] == "auc_mic_primary"
+    assert result["target_assessment"]["primary_label"] == "AUC/MIC >= 400"
+    assert result["target_assessment"]["auc_mic"] == result["auc_mic"]
+
+
+def test_target_assessment_falls_back_to_auc24_without_mic():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=25,
+            t1_start_h=2,
+            c2=12,
+            t2_start_h=10,
+            method="Bayesian",
+            mic=None,
+        )
+    )
+    assert result["target_assessment"]["target_basis"] == "auc24_fallback"
+    assert result["target_assessment"]["primary_label"] == "AUC24 400–600"
+
+
+def test_toxicity_assessment_flags_mismatch_when_auc_mic_not_met_and_auc24_high():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=2000,
+            tau_h=8,
+            tinf_h=2,
+            c1=60,
+            t1_start_h=3,
+            c2=40,
+            t2_start_h=7,
+            method="Klasszikus",
+            mic=4.0,
+        )
+    )
+    tox = result["toxicity_assessment"]
+    assert tox["auc24_overexposure"]
+    assert tox["efficacy_toxicity_mismatch"]
+    assert tox["consider_alternative_therapy"]
+    assert tox["message_lines"]
+
+
+def test_toxicity_assessment_flags_auc24_overexposure_without_mic():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=2000,
+            tau_h=8,
+            tinf_h=2,
+            c1=60,
+            t1_start_h=3,
+            c2=40,
+            t2_start_h=7,
+            method="Bayesian",
+            mic=None,
+        )
+    )
+    tox = result["toxicity_assessment"]
+    assert tox["auc24_overexposure"]
+    assert not tox["efficacy_toxicity_mismatch"]
 
 
 def test_engine_trapezoid_override_does_not_crash_and_sets_explanation():
@@ -398,3 +572,40 @@ def test_classical_path_plot_payload_keeps_legacy_keys():
     plot = result["plot"]
     for key in ["title", "single_model", "model_averaging", "current_x", "current_y", "best_x", "best_y", "obs_x", "obs_y", "metadata", "warnings", "errors"]:
         assert key in plot
+    single = plot["single_model"]
+    assert len(single.get("pred_x", [])) >= 80
+    assert len(single.get("pred_y", [])) >= 80
+    assert len(single.get("pred_x", [])) > len(single.get("obs_x", []))
+    assert plot.get("metadata", {}).get("mode") == "trapezoid_classic"
+
+
+def test_classical_curve_keeps_negative_loading_event_and_stable_scale():
+    result = calculate(
+        VancomycinInputs(
+            sex="férfi",
+            age=60,
+            weight_kg=80,
+            scr_umol=100,
+            dose_mg=1000,
+            tau_h=12,
+            tinf_h=1,
+            c1=23.5,
+            t1_start_h=2,
+            c2=8.0,
+            t2_start_h=11,
+            method="Klasszikus",
+            episode_events=[
+                {"event_type": "loading_dose", "time_h": -12, "dose_mg": 1500, "tinf_h": 2},
+                {"event_type": "maintenance_dose", "time_h": 0, "dose_mg": 1000, "tinf_h": 1},
+                {"event_type": "sample", "time_h": 2, "level_mg_l": 23.5},
+                {"event_type": "sample", "time_h": 11, "level_mg_l": 8.0},
+            ],
+        )
+    )
+    plot = result["plot"]
+    single = plot["single_model"]
+    dose_times = [float(ev.get("time", 0.0)) for ev in single.get("dose_events", [])]
+    assert min(dose_times) <= -12.0
+    assert 0.0 in dose_times
+    assert min(single.get("pred_x", [0.0])) <= -12.0
+    assert max(single.get("pred_y", [0.0])) <= 1e6

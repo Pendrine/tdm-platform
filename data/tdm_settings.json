@@ -1,0 +1,9 @@
+{
+  "smtp_host": "mail.dpckorhaz.hu",
+  "smtp_port": 587,
+  "smtp_user": "infect@dpckorhaz.hu",
+  "smtp_pass": "pepsimax91#",
+  "smtp_from": "infect@dpckorhaz.hu",
+  "smtp_starttls": true,
+  "smtp_ssl": false
+}

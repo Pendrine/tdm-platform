@@ -1,0 +1,14 @@
+[
+  {
+    "email": "visnyovszki.adam@dpckorhaz.hu",
+    "username": "visnyovszki.adam",
+    "name": "Dr. Visnyovszki Ádám",
+    "role": "moderator",
+    "verified": true,
+    "active": true,
+    "password_hash": "b7eee7191beac2e0f35131c2808c9000f48f95f97dddb6822e9bcf5810d5735f",
+    "verification_code": "",
+    "verified_at": "2026-04-06 19:33:22",
+    "password_changed_at": "2026-04-06 19:34:41"
+  }
+]

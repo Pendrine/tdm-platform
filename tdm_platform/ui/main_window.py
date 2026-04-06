@@ -1551,7 +1551,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def _on_main_tabs_changed(self, _idx: int) -> None:
         pending = getattr(self, "_pending_plot_spec", None)
-        if pending is not None and self._is_visualization_tab_active() and self._is_plot_view_visible():
+        if pending is not None and MainWindow._is_visualization_tab_active(self) and MainWindow._is_plot_view_visible(self):
             print("[DEBUG][PLOT] main tab became visible; rendering deferred plot.")
             self._pending_plot_spec = None
             self._plot_render_deferred = False
@@ -1634,6 +1634,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self.viz_averaging.setHtml("<br/>".join([f"{ov.get('label','-')}: w={ov.get('weight',0):.3f}" for ov in avg.get("overlays", [])]) or "Nincs model averaging adat.")
 
     def _schedule_plot_fallback(self, request_id: int) -> None:
+        if not hasattr(self, "metaObject"):
+            MainWindow._execute_plot_fallback(self, request_id)
+            return
+        if not hasattr(self, "metaObject"):
+            self._execute_plot_fallback(request_id)
+            return
         state = (getattr(self, "_plot_request_states", {}) or {}).get(request_id, {})
         print(f"[DEBUG][PLOT] delayed fallback scheduled: id={request_id} state={state}")
         timer = getattr(self, "_plot_fallback_timer", None)
@@ -1642,7 +1648,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         self._plot_fallback_request_id = request_id
         self._plot_fallback_timer = QTimer(self)
         self._plot_fallback_timer.setSingleShot(True)
-        self._plot_fallback_timer.timeout.connect(lambda rid=request_id: self._execute_plot_fallback(rid))
+        self._plot_fallback_timer.timeout.connect(lambda rid=request_id: MainWindow._execute_plot_fallback(self, rid))
         self._plot_fallback_timer.start(600)
 
     def _execute_plot_fallback(self, request_id: int) -> None:
@@ -1654,7 +1660,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         if state.get("succeeded") or state.get("fallback_executed"):
             print(f"[DEBUG][PLOT] delayed fallback skipped: id={request_id} reason=resolved state={state}")
             return
-        if not self._is_plot_view_visible() or not MATPLOTLIB_UI_OK:
+        if not MainWindow._is_plot_view_visible(self) or not MATPLOTLIB_UI_OK:
             return
         pred_x = state.get("pred_x", [])
         pred_y = state.get("pred_y", [])
@@ -1678,7 +1684,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         state["pending"] = False
         state["fallback_executed"] = True
         self._plot_renderer_state = "Matplotlib fallback"
-        self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+        MainWindow._update_plot_summary(self, state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
         print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
 
     def _render_manual_matplotlib_fallback(self) -> None:
@@ -1692,7 +1698,12 @@ class MainWindow(legacy_ui.TDMMainWindow):
         state["fallback_executed"] = False
         self._execute_plot_fallback(rid)
 
+
     def _render_plotly_html_via_file(self, html: str) -> bool:
+        view = getattr(self, "viz_plot_view", None)
+        if view is not None and hasattr(view, "setHtml") and not hasattr(view, "load"):
+            view.setHtml(html)
+            return True
         try:
             plot_dir = Path(tempfile.gettempdir()) / "tdm_platform_plots"
             plot_dir.mkdir(parents=True, exist_ok=True)
@@ -1704,6 +1715,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         except Exception as exc:
             print(f"[DEBUG][PLOT] file-based render failed: {exc}")
             return False
+    
 
     def _collect_history_sample_points(self) -> list[dict]:
         points: list[dict] = []
@@ -1815,7 +1827,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         return "maintenance_dose"
 
     def _expand_dose_events_for_plot(self, dose_events: list[dict], obs_x: list[float], pred_x: list[float]) -> list[dict]:
-        payload = self._last_pk_payload or {}
+        payload = getattr(self, "_last_pk_payload", {}) or {}
         expanded: list[dict] = []
         seen: set[tuple[float, str]] = set()
         ref_dt = None
@@ -1836,7 +1848,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 t_val = self._safe_optional_float(raw.get("time_h"))
             if t_val is None:
                 return
-            et = self._normalize_dose_event_type(raw.get("event_type", "maintenance_dose"))
+            et = MainWindow._normalize_dose_event_type(raw.get("event_type", "maintenance_dose"))
             key = (round(float(t_val), 4), et)
             if key in seen:
                 return
@@ -1929,9 +1941,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
         return x, y, float(peak_ss), float(trough_ss)
 
     def _build_regimen_overlay_traces(self, fig: go.Figure, view_mode: str) -> None:
-        if not self.results or not self.results.get("pk"):
+        results = getattr(self, "results", {}) or {}
+        if not results or not results.get("pk"):
             return
-        pk = self.results["pk"]
+        pk = results["pk"]
         show_conc = bool(hasattr(self, "toggle_regimen_conc") and self.toggle_regimen_conc.isChecked())
         show_auc = bool(hasattr(self, "toggle_regimen_auc") and self.toggle_regimen_auc.isChecked())
         cl_l_h = float(pk.get("cl_l_h") or 0.0)
@@ -1988,11 +2001,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
         base_xy = sorted([(float(px), max(0.0, float(py))) for px, py in zip(pred_x, pred_y)], key=lambda p: p[0])
         x_base = [p[0] for p in base_xy]
         y_base = [p[1] for p in base_xy]
-        dose_times = [self._safe_optional_float(ev.get("time")) for ev in dose_events]
+        dose_times = [MainWindow._safe_optional_float(ev.get("time")) for ev in dose_events]
         dose_times = [float(t) for t in dose_times if t is not None]
-        obs_times = [self._safe_optional_float(t) for t in obs_x]
+        obs_times = [MainWindow._safe_optional_float(t) for t in obs_x]
         obs_times = [float(t) for t in obs_times if t is not None]
-        tau_h = self._safe_optional_float((self._last_pk_payload or {}).get("tau")) or 12.0
+        tau_h = MainWindow._safe_optional_float((getattr(self, "_last_pk_payload", {}) or {}).get("tau")) or 12.0
         target_start = min([x_base[0]] + dose_times + obs_times)
         target_end = max([x_base[-1]] + dose_times + obs_times) + max(0.25 * tau_h, 2.0)
         step = max(0.25, tau_h / 24.0)
@@ -2020,18 +2033,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     return y0 + (y1 - y0) * ratio
             return y_base[-1]
 
-        cl_l_h = self._safe_optional_float((self.results or {}).get("pk", {}).get("cl_l_h")) or 0.0
-        vd_l = self._safe_optional_float((self.results or {}).get("pk", {}).get("vd_l")) or 0.0
+        results = getattr(self, "results", {}) or {}
+        cl_l_h = MainWindow._safe_optional_float(results.get("pk", {}).get("cl_l_h")) or 0.0
+        vd_l = MainWindow._safe_optional_float(results.get("pk", {}).get("vd_l")) or 0.0
         k = (cl_l_h / vd_l) if (cl_l_h > 0 and vd_l > 0) else ke_tail
 
         def _predose_contrib(t: float) -> float:
             total = 0.0
             for ev in dose_events:
-                t0 = self._safe_optional_float(ev.get("time"))
+                t0 = MainWindow._safe_optional_float(ev.get("time"))
                 if t0 is None or t0 >= x_base[0]:
                     continue
-                dose_val = self._safe_optional_float(ev.get("dose") or ev.get("dose_mg")) or 0.0
-                tinf = self._safe_optional_float(ev.get("tinf") or ev.get("tinf_h")) or 1.0
+                dose_val = MainWindow._safe_optional_float(ev.get("dose") or ev.get("dose_mg")) or 0.0
+                tinf = MainWindow._safe_optional_float(ev.get("tinf") or ev.get("tinf_h")) or 1.0
                 if dose_val <= 0:
                     continue
                 r0 = dose_val / max(tinf, 1e-6)
@@ -2069,7 +2083,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 bool(hasattr(self, "viz_mode_tabs") and self.viz_mode_tabs.currentIndex() == 1),
                 str(self.view_combo.currentText()) if hasattr(self, "view_combo") else "",
             )
-            if (not self._is_visualization_tab_active()) or (not self._is_plot_view_visible()):
+            if (not MainWindow._is_visualization_tab_active(self)) or (not MainWindow._is_plot_view_visible(self)):
                 if getattr(self, "_plot_render_deferred", False) and getattr(self, "_last_render_signature", None) == render_signature:
                     return
                 self._pending_plot_spec = spec or {}
@@ -2084,9 +2098,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
             obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
             obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
-            obs_time_points = [self._safe_optional_float(x) for x in obs_x]
-            pred_time_points = [self._safe_optional_float(x) for x in pred_x]
-            dose_events = self._expand_dose_events_for_plot(
+            obs_time_points = [MainWindow._safe_optional_float(x) for x in obs_x]
+            pred_time_points = [MainWindow._safe_optional_float(x) for x in pred_x]
+            dose_events = MainWindow._expand_dose_events_for_plot(
+                self,
                 list(single.get("dose_events") or spec.get("dose_events", []) or []),
                 [float(x) for x in obs_time_points if x is not None],
                 [float(x) for x in pred_time_points if x is not None],
@@ -2094,7 +2109,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             metadata_mode = str((spec.get("metadata") or {}).get("mode", "")).lower()
             is_classical_mode = metadata_mode == "trapezoid_classic" or "klasszikus" in str((single or {}).get("label", "")).lower()
             if pred_x and pred_y and not is_classical_mode:
-                pred_x, pred_y = self._align_curve_with_timeline(pred_x, pred_y, dose_events, obs_x)
+                pred_x, pred_y = MainWindow._align_curve_with_timeline(self, pred_x, pred_y, dose_events, obs_x)
             elif is_classical_mode:
                 print("[DEBUG][PLOT] classical mode: UI timeline stitching skipped (engine payload used as-is)")
             print(
@@ -2113,7 +2128,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             if observed_master and (not hasattr(self, "toggle_current_samples") or self.toggle_current_samples.isChecked()) and obs_x and obs_y:
                 fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode="markers", name="Aktuális observed", marker=dict(size=10, color="#16a34a")))
             if observed_master and hasattr(self, "toggle_history_samples") and self.toggle_history_samples.isChecked():
-                hp = self._collect_history_sample_points()
+                hp = MainWindow._collect_history_sample_points(self)
                 history_horizon = max([0.0] + [float(v) for v in pred_x if isinstance(v, (int, float))] + [float(v) for v in obs_x if isinstance(v, (int, float))]) if (pred_x or obs_x) else 0.0
                 hp = [p for p in hp if 0.0 <= float(p.get("time_h", 0.0)) <= history_horizon + 1e-6]
                 if hp:
@@ -2155,10 +2170,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 except Exception as exc:
                     print(f"[DEBUG][PLOT] classical fitted curve build failed: {exc}")
             if (not hasattr(self, "toggle_dose_events") or self.toggle_dose_events.isChecked()) and dose_events:
-                self._build_dose_event_traces(fig, dose_events, max(pred_y + obs_y + [1.0]) * 1.05)
+                MainWindow._build_dose_event_traces(self, fig, dose_events, max(pred_y + obs_y + [1.0]) * 1.05)
             if view_mode == "auc" and pred_x and pred_y:
                 fig.add_trace(go.Scatter(x=pred_x, y=pred_y, fill="tozeroy", mode="lines", opacity=0.25, name="AUC area"))
-            mic_value_for_plot = self._safe_optional_float((self._last_pk_payload or {}).get("mic"))
+            mic_value_for_plot = MainWindow._safe_optional_float((getattr(self, "_last_pk_payload", {}) or {}).get("mic"))
             if (
                 view_mode == "concentration"
                 and mic_value_for_plot is not None
@@ -2173,9 +2188,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     annotation_text=f"MIC {mic_value_for_plot:g}",
                     annotation_position="top left",
                 )
-            self._build_regimen_overlay_traces(fig, view_mode)
-            mic_value = (self.results or {}).get("pk", {}).get("auc_mic")
-            subtitle = f"AUC/MIC: {self._fmt_float(mic_value, 1, na='n.a.')}" if mic_value is not None else "MIC nincs megadva"
+            MainWindow._build_regimen_overlay_traces(self, fig, view_mode)
+            mic_value = (getattr(self, "results", {}) or {}).get("pk", {}).get("auc_mic")
+            subtitle = f"AUC/MIC: {MainWindow._fmt_float(mic_value, 1, na='n.a.')}" if mic_value is not None else "MIC nincs megadva"
             fig.update_layout(
                 title=f"{spec.get('title', 'Vancomycin PK timeline')} — {'Model averaging' if show_averaging else 'Single model'}<br><sup>{subtitle}</sup>",
                 xaxis_title="Idő (óra)",
@@ -2203,10 +2218,10 @@ class MainWindow(legacy_ui.TDMMainWindow):
             )
             print("[DEBUG][PLOT] html length:", len(html))
             print("[DEBUG][PLOT] contains 'plotly':", "plotly" in html.lower())
-            ok_file_render = self._render_plotly_html_via_file(html)
+            ok_file_render = MainWindow._render_plotly_html_via_file(self, html)
             if not ok_file_render:
                 print("[DEBUG][PLOT] Plotly file render failed -> fallback needed")
-            self._plot_renderer_state = "Plotly loading" if self._is_plot_webengine() else "Non-Plotly HTML widget"
+            self._plot_renderer_state = "Plotly loading" if MainWindow._is_plot_webengine(self) else "Non-Plotly HTML widget"
             self._plot_retry_done = False
             self._plot_request_states = {}
             self._plot_request_states[request_id] = {
@@ -2221,11 +2236,11 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 "succeeded": False,
                 "fallback_executed": False,
             }
-            self._update_plot_summary(single, avg, len(fig.data), self._plot_renderer_state)
+            MainWindow._update_plot_summary(self, single, avg, len(fig.data), self._plot_renderer_state)
             if not ok_file_render:
-                self._execute_plot_fallback(request_id)
+                MainWindow._execute_plot_fallback(self, request_id)
                 return
-            if self._is_plot_webengine() and hasattr(view, "loadFinished"):
+            if MainWindow._is_plot_webengine(self) and hasattr(view, "loadFinished"):
                 def _on_load_finished(ok: bool):
                     active_id = int(getattr(self, "_active_plot_request_id", -1))
                     print(f"[DEBUG][PLOT] loadFinished({ok}): id={active_id}")
@@ -2240,7 +2255,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                                     return
                                 if not bool(js_ok):
                                     print(f"[DEBUG][PLOT] JS probe failed; scheduling fallback for id={active_id}")
-                                    self._schedule_plot_fallback(active_id)
+                                    MainWindow._schedule_plot_fallback(self, active_id)
                                     return
                                 timer = getattr(self, "_plot_fallback_timer", None)
                                 if timer is not None and timer.isActive() and getattr(self, "_plot_fallback_request_id", -1) == active_id:
@@ -2249,7 +2264,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
                                 state["succeeded"] = True
                                 state["pending"] = False
                                 self._plot_renderer_state = "Plotly"
-                                self._update_plot_summary(state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
+                                MainWindow._update_plot_summary(self, state.get("single", {}), state.get("avg", {}), int(state.get("trace_count", 0)), self._plot_renderer_state)
                                 print(f"[DEBUG][PLOT] request state after success: id={active_id} state={state}")
                                 print(f"[DEBUG][PLOT] final renderer state: {self._plot_renderer_state}")
 

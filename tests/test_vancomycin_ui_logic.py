@@ -246,8 +246,51 @@ def test_collect_history_sample_points_uses_event_datetime_window_and_reference_
     )
     points = MainWindow._collect_history_sample_points(dummy)
     assert len(points) == 1
-    # 11:00 relative to 08:00 -> 3h (datetime-first projection instead of stale time_h)
+    # 11:00 relative to 08:00 -> 3h (datetime fallback when explicit time_h is missing)
     assert abs(points[0]["time_h"] - 3.0) < 1e-6
+
+
+def test_collect_history_sample_points_prefers_time_h_over_datetime_when_available():
+    ref_dt = main_window_module.datetime(2026, 4, 1, 8, 0, 0)
+    dummy = SimpleNamespace(
+        _last_pk_payload={
+            "patient_id": "P-001",
+            "episode_events": [
+                {"time_h": "2"},
+                {"time_h": "12"},
+            ],
+        },
+        relative_reference_dt=SimpleNamespace(dateTime=lambda: SimpleNamespace(toPython=lambda: ref_dt)),
+        history_data=[
+            {
+                "drug": "vancomycin",
+                "patient_id": "P-001",
+                "timestamp": "2026-04-01T00:00:00",
+                "method": "Bayesian",
+                "inputs": {
+                    "episode_events": [
+                        {"event_type": "sample", "level_mg_l": "20", "time_h": "5", "event_datetime": "2026-04-03T11:00:00"},
+                    ]
+                },
+            }
+        ],
+        _safe_optional_float=MainWindow._safe_optional_float,
+        _parse_event_datetime=MainWindow._parse_event_datetime,
+    )
+    points = MainWindow._collect_history_sample_points(dummy)
+    assert len(points) == 1
+    assert abs(points[0]["time_h"] - 5.0) < 1e-6
+
+
+def test_extract_history_patient_ids_returns_unique_case_insensitive_sorted_values():
+    rows = [
+        {"patient_id": "P-002"},
+        {"patient_id": "p-001"},
+        {"patient_id": "P-001"},
+        {"patient_id": "  "},
+        {},
+    ]
+    assert MainWindow._extract_history_patient_ids(rows) == ["p-001", "P-002"]
 
 
 def test_expand_dose_events_for_plot_generates_intermediate_cycles_beyond_latest_sample():

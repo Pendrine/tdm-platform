@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QDateTimeEdit,
     QFileDialog,
@@ -345,7 +346,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
         layout.addLayout(btn_row)
         self.episode_events_table = QTableWidget(0, 8)
         self.episode_events_table.setHorizontalHeaderLabels(
-            ["Időpont", "Esemény típusa", "Dózis (mg)", "Infúziós idő (h)", "Szint (mg/L)", "MIC", "Kreatinin", "Megjegyzés"]
+            ["Relatív idő (h)", "Esemény típusa", "Dózis (mg)", "Infúziós idő (h)", "Szint (mg/L)", "MIC", "Kreatinin", "Megjegyzés"]
         )
         self._sync_from_table_lock = False
         self.episode_events_table.itemChanged.connect(self._sync_inputs_from_event_table)
@@ -881,6 +882,18 @@ class MainWindow(legacy_ui.TDMMainWindow):
         except Exception:
             return None
 
+    @staticmethod
+    def _to_relative_hour(raw: object, reference_dt: datetime | None = None) -> float | None:
+        numeric = MainWindow._safe_optional_float(raw)
+        if numeric is not None:
+            return float(numeric)
+        if reference_dt is None:
+            return None
+        dt_obj = MainWindow._parse_event_datetime(raw)
+        if dt_obj is None:
+            return None
+        return (dt_obj - reference_dt).total_seconds() / 3600.0
+
     def _safe_required_float(self, raw: object, field: str) -> float:
         value = self._safe_optional_float(raw)
         if value is None:
@@ -1320,7 +1333,38 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
     def load_history(self) -> list[dict]:
         rows = self._history_tab.load_rows()
+        self._refresh_patient_id_completer(rows)
         return rows
+
+    @staticmethod
+    def _extract_history_patient_ids(history_rows: object) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for row in history_rows or []:
+            if not isinstance(row, dict):
+                continue
+            pid = str(row.get("patient_id", "")).strip()
+            if not pid:
+                continue
+            key = pid.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(pid)
+        return sorted(result, key=lambda item: item.lower())
+
+    def _refresh_patient_id_completer(self, history_rows: object | None = None) -> None:
+        line_edit = getattr(self, "patient_edit", None)
+        if line_edit is None or not hasattr(line_edit, "setCompleter"):
+            return
+        rows = history_rows if history_rows is not None else getattr(self, "history_data", [])
+        patient_ids = MainWindow._extract_history_patient_ids(rows)
+        completer = QCompleter(patient_ids, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        if hasattr(completer, "setFilterMode"):
+            completer.setFilterMode(Qt.MatchContains)
+        line_edit.setCompleter(completer)
 
     def save_history(self):
         self._history_tab.save_rows(self.history_data)
@@ -1728,16 +1772,21 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 ref_dt = self.relative_reference_dt.dateTime().toPython()
             except Exception:
                 ref_dt = None
-        current_event_dts = [
-            self._parse_event_datetime(ev.get("event_datetime"))
-            for ev in ((self._last_pk_payload or {}).get("episode_events") or [])
-            if isinstance(ev, dict)
-        ]
-        current_event_dts = [dt for dt in current_event_dts if dt is not None]
-        window_start = min(current_event_dts) if current_event_dts else None
-        window_end = max(current_event_dts) if current_event_dts else None
-        if ref_dt is None or window_start is None or window_end is None:
-            return points
+        current_event_times_h = []
+        for ev in ((self._last_pk_payload or {}).get("episode_events") or []):
+            if not isinstance(ev, dict):
+                continue
+            t_h = self._safe_optional_float(ev.get("time_h"))
+            if t_h is None:
+                t_h = self._safe_optional_float(ev.get("time"))
+            if t_h is None and ref_dt is not None:
+                ev_dt = self._parse_event_datetime(ev.get("event_datetime"))
+                if ev_dt is not None:
+                    t_h = (ev_dt - ref_dt).total_seconds() / 3600.0
+            if t_h is not None:
+                current_event_times_h.append(float(t_h))
+        window_start_h = min(current_event_times_h) if current_event_times_h else None
+        window_end_h = max(current_event_times_h) if current_event_times_h else None
         for row in self.history_data or []:
             if str(row.get("drug", "")).lower() != "vancomycin":
                 continue
@@ -1752,6 +1801,9 @@ class MainWindow(legacy_ui.TDMMainWindow):
                 c = self._safe_optional_float(ev.get("level_mg_l"))
                 if c is None:
                     continue
+                t_h = self._safe_optional_float(ev.get("time_h"))
+                if t_h is None:
+                    t_h = self._safe_optional_float(ev.get("time"))
                 event_dt = str(
                     ev.get("event_datetime")
                     or ev.get("sample_datetime")
@@ -1759,15 +1811,19 @@ class MainWindow(legacy_ui.TDMMainWindow):
                     or ts
                     or ""
                 ).strip()
-                event_dt_obj = self._parse_event_datetime(event_dt)
-                if event_dt_obj is None:
+                if t_h is None and ref_dt is not None:
+                    event_dt_obj = self._parse_event_datetime(event_dt)
+                    if event_dt_obj is not None:
+                        t_h = (event_dt_obj - ref_dt).total_seconds() / 3600.0
+                if t_h is None:
                     continue
-                if event_dt_obj < window_start or event_dt_obj > window_end:
+                if window_start_h is not None and float(t_h) < window_start_h:
                     continue
-                t_h = (event_dt_obj - ref_dt).total_seconds() / 3600.0
+                if window_end_h is not None and float(t_h) > window_end_h:
+                    continue
                 points.append(
                     {
-                        "time_h": t_h,
+                        "time_h": float(t_h),
                         "conc": c,
                         "episode_ts": ts,
                         "event_dt": event_dt,
@@ -1839,13 +1895,14 @@ class MainWindow(legacy_ui.TDMMainWindow):
 
         def _append_event(raw: dict, source: str) -> None:
             t_val = None
-            raw_dt = self._parse_event_datetime(raw.get("event_datetime") or raw.get("timestamp"))
-            if ref_dt is not None and raw_dt is not None:
-                t_val = (raw_dt - ref_dt).total_seconds() / 3600.0
+            if t_val is None:
+                t_val = self._safe_optional_float(raw.get("time_h"))
             if t_val is None:
                 t_val = self._safe_optional_float(raw.get("time"))
             if t_val is None:
-                t_val = self._safe_optional_float(raw.get("time_h"))
+                raw_dt = self._parse_event_datetime(raw.get("event_datetime") or raw.get("timestamp"))
+                if ref_dt is not None and raw_dt is not None:
+                    t_val = (raw_dt - ref_dt).total_seconds() / 3600.0
             if t_val is None:
                 return
             et = MainWindow._normalize_dose_event_type(raw.get("event_type", "maintenance_dose"))
@@ -2094,10 +2151,28 @@ class MainWindow(legacy_ui.TDMMainWindow):
             self._plot_render_deferred = False
             single = spec.get("single_model") or {}
             avg = spec.get("model_averaging") or {}
-            pred_x = list(single.get("pred_x") or spec.get("current_x", []) or [])
-            pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
-            obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
-            obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
+            ref_dt = None
+            if hasattr(self, "relative_reference_dt"):
+                try:
+                    ref_dt = self.relative_reference_dt.dateTime().toPython()
+                except Exception:
+                    ref_dt = None
+            raw_pred_x = list(single.get("pred_x") or spec.get("current_x", []) or [])
+            raw_pred_y = list(single.get("pred_y") or spec.get("current_y", []) or [])
+            pred_pairs = [
+                (MainWindow._to_relative_hour(px, ref_dt), py)
+                for px, py in zip(raw_pred_x, raw_pred_y)
+            ]
+            pred_x = [float(px) for px, _ in pred_pairs if px is not None]
+            pred_y = [py for px, py in pred_pairs if px is not None]
+            raw_obs_x = list(single.get("obs_x") or spec.get("obs_x", []) or [])
+            raw_obs_y = list(single.get("obs_y") or spec.get("obs_y", []) or [])
+            obs_pairs = [
+                (MainWindow._to_relative_hour(ox, ref_dt), oy)
+                for ox, oy in zip(raw_obs_x, raw_obs_y)
+            ]
+            obs_x = [float(ox) for ox, _ in obs_pairs if ox is not None]
+            obs_y = [oy for ox, oy in obs_pairs if ox is not None]
             obs_time_points = [MainWindow._safe_optional_float(x) for x in obs_x]
             pred_time_points = [MainWindow._safe_optional_float(x) for x in pred_x]
             dose_events = MainWindow._expand_dose_events_for_plot(
@@ -2759,6 +2834,7 @@ class MainWindow(legacy_ui.TDMMainWindow):
             },
         )
         self.history_data = self._history_store.append(record)
+        self._refresh_patient_id_completer(self.history_data)
         if hasattr(self, "history_table"):
             self.history_table.setProperty("selected_history_record_id", None)
         self.refresh_history_filter()
